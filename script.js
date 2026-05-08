@@ -4015,27 +4015,18 @@ const saveProfile = (e) => {
                 const nextPlayedAt = normalizedNext.playedAt ?? 0;
                 return nextPlayedAt >= prevPlayedAt ? normalizedNext : normalizedPrevious;
             };
-            const getGlobalArenaDerivedState = (arenaName, sourceArenaBattleState = arenaBattleState) => {
+            const getGlobalArenaDerivedState = (arenaName, sourceArenaGlobalState = null) => {
                 const normalizedArena = String(arenaName || '').trim();
                 if (!normalizedArena) {
                     return buildArenaDerivedState({}, []);
                 }
 
-                const mergedDirectMatchups = {};
-                Object.entries(sourceArenaBattleState || {}).forEach(([arenaStateKey, state]) => {
-                    if (!isArenaStateKeyForArena(arenaStateKey, normalizedArena)) return;
-                    const directMatchups = state?.directMatchups || {};
-                    Object.entries(directMatchups).forEach(([pairKey, rawRecord]) => {
-                        mergedDirectMatchups[pairKey] = mergeDirectMatchupRecord(mergedDirectMatchups[pairKey], rawRecord);
-                    });
-                });
+                const globalKey = getArenaGlobalKey(normalizedArena);
+                const globalStateForArena = sourceArenaGlobalState || arenaGlobalState?.[globalKey] || {};
+                const directMatchups = globalStateForArena?.directMatchups || globalStateForArena?.matchups || {};
+                const allProfileIds = getArenaOrderedProfileIds(perfiles);
 
-                const allProfileIds = [...(perfiles || [])]
-                    .map((profile) => profile?.firebaseId)
-                    .filter(Boolean)
-                    .sort((a, b) => String(a).localeCompare(String(b), 'es', { sensitivity: 'base' }));
-
-                return buildArenaDerivedState(mergedDirectMatchups, allProfileIds);
+                return buildArenaDerivedState(directMatchups, allProfileIds);
             };
             const getArenaStats = (arenaName, profileId) => {
                 const globalStats = getGlobalArenaDerivedState(arenaName).stats || {};
@@ -4043,8 +4034,8 @@ const saveProfile = (e) => {
                 const score = stats.battles ? Math.round((stats.wins / stats.battles) * 100) : 0;
                 return { ...stats, score };
             };
-            const buildArenaScoreMapFromGlobalStats = (arenaName, sourceArenaBattleState = arenaBattleState) => {
-                const globalStats = getGlobalArenaDerivedState(arenaName, sourceArenaBattleState).stats || {};
+            const buildArenaScoreMapFromGlobalStats = (arenaName, sourceArenaGlobalState = null) => {
+                const globalStats = getGlobalArenaDerivedState(arenaName, sourceArenaGlobalState).stats || {};
                 return [...(perfiles || [])]
                     .filter((profile) => profile?.firebaseId)
                     .reduce((acc, profile) => {
@@ -4133,8 +4124,12 @@ const saveProfile = (e) => {
 
                     repairedStates[arenaKey] = normalized;
                     updates.push(
-                        db.ref(`arenaBattleState/${arenaKey}`).set(normalized)
-                            .catch(error => console.error('No se pudo normalizar el estado del arena:', error))
+                        db.ref(`arenaBattleState/${arenaKey}`).transaction((currentState) => {
+                            if (JSON.stringify(currentState || {}) !== JSON.stringify(state || {})) {
+                                return currentState;
+                            }
+                            return { ...(currentState || {}), ...normalized };
+                        }).catch(error => console.error('No se pudo normalizar el estado del arena:', error))
                     );
                 });
 
@@ -4147,6 +4142,82 @@ const saveProfile = (e) => {
 
                 Promise.all(updates).catch(() => {});
             }, [arenaBattleState, arenaGlobalState, perfiles]);
+
+            useEffect(() => {
+                if (!perfiles.length) return;
+
+                const localGlobalUpdates = {};
+                const derivedWrites = [];
+                const scoreWrites = [];
+                const localScoreMaps = {};
+
+                Object.entries(arenaGlobalState || {}).forEach(([globalKey, rawGlobalState]) => {
+                    const normalizedGlobal = normalizeArenaGlobalState(globalKey, rawGlobalState || {});
+                    if (!normalizedGlobal) return;
+
+                    const derivedPatch = {
+                        arenaName: normalizedGlobal.arenaName,
+                        orderedIds: normalizedGlobal.orderedIds,
+                        matchups: normalizedGlobal.matchups,
+                        victoryGraph: normalizedGlobal.victoryGraph,
+                        stats: normalizedGlobal.stats
+                    };
+                    const remoteDerived = {
+                        arenaName: rawGlobalState?.arenaName,
+                        orderedIds: rawGlobalState?.orderedIds,
+                        matchups: rawGlobalState?.matchups,
+                        victoryGraph: rawGlobalState?.victoryGraph,
+                        stats: rawGlobalState?.stats
+                    };
+                    const directMatchupsChanged = JSON.stringify(rawGlobalState?.directMatchups || {}) !== JSON.stringify(normalizedGlobal.directMatchups || {});
+                    const derivedChanged = JSON.stringify(remoteDerived) !== JSON.stringify(derivedPatch);
+
+                    if (directMatchupsChanged || derivedChanged) {
+                        localGlobalUpdates[globalKey] = {
+                            ...(rawGlobalState || {}),
+                            directMatchups: normalizedGlobal.directMatchups,
+                            ...derivedPatch
+                        };
+                    }
+
+                    if (derivedChanged) {
+                        derivedWrites.push(
+                            db.ref(`arenaGlobalState/${globalKey}`).update(derivedPatch)
+                                .catch(error => console.error('No se pudo actualizar derivados del arena:', error))
+                        );
+                    }
+
+                    const scoreMap = buildArenaScoreMapFromGlobalStats(globalKey, normalizedGlobal);
+                    localScoreMaps[globalKey] = scoreMap;
+                    Object.entries(scoreMap).forEach(([profileId, nextScore]) => {
+                        const profile = (perfiles || []).find((item) => item?.firebaseId === profileId);
+                        if (Number(profile?.puntuaciones?.[globalKey]) === Number(nextScore)) return;
+                        scoreWrites.push(updateProfileArenaScore(profileId, globalKey, nextScore));
+                    });
+                });
+
+                if (Object.keys(localGlobalUpdates).length) {
+                    setArenaGlobalState(prev => ({ ...prev, ...localGlobalUpdates }));
+                }
+
+                if (Object.keys(localScoreMaps).length) {
+                    setPerfiles(prev => prev.map(profile => {
+                        if (!profile?.firebaseId) return profile;
+                        const nextScores = { ...(profile.puntuaciones || {}) };
+                        let changed = false;
+                        Object.entries(localScoreMaps).forEach(([arenaName, scoreMap]) => {
+                            if (!Object.prototype.hasOwnProperty.call(scoreMap, profile.firebaseId)) return;
+                            const nextScore = scoreMap[profile.firebaseId];
+                            if (Number(nextScores[arenaName]) === Number(nextScore)) return;
+                            nextScores[arenaName] = nextScore;
+                            changed = true;
+                        });
+                        return changed ? { ...profile, puntuaciones: nextScores } : profile;
+                    }));
+                }
+
+                Promise.all([...derivedWrites, ...scoreWrites]).catch(() => {});
+            }, [arenaGlobalState, perfiles]);
 
             useEffect(() => {
                 if (!perfiles.length) return;
@@ -4178,8 +4249,10 @@ const saveProfile = (e) => {
                     if (!normalizedGlobal) return;
                     localUpdates[globalKey] = normalizedGlobal;
                     updates.push(
-                        db.ref(`arenaGlobalState/${globalKey}`).set(normalizedGlobal)
-                            .catch(error => console.error('No se pudo migrar arenaGlobalState:', error))
+                        db.ref(`arenaGlobalState/${globalKey}`).transaction((currentGlobal) => {
+                            if (currentGlobal) return currentGlobal;
+                            return normalizedGlobal;
+                        }).catch(error => console.error('No se pudo migrar arenaGlobalState:', error))
                     );
                 });
 
@@ -4233,8 +4306,10 @@ const saveProfile = (e) => {
                         ...prev,
                         [globalKey]: normalizedGlobal
                     }));
-                    db.ref(`arenaGlobalState/${globalKey}`).set(normalizedGlobal)
-                        .catch(error => console.error('No se pudo guardar arenaGlobalState inicial:', error));
+                    db.ref(`arenaGlobalState/${globalKey}`).transaction((currentGlobal) => {
+                        if (currentGlobal) return currentGlobal;
+                        return normalizedGlobal;
+                    }).catch(error => console.error('No se pudo guardar arenaGlobalState inicial:', error));
                 }
 
                 db.ref(`arenaBattleState/${arenaKey}`).set(nextArenaState)
@@ -4255,7 +4330,7 @@ const saveProfile = (e) => {
                 const state = arenaBattleState[arenaKey];
                 if (!state || state.isFinished) return;
                 const globalKey = getArenaGlobalKey(arenaName);
-                const currentGlobalState = normalizeArenaGlobalState(arenaName, arenaGlobalState?.[globalKey] || {});
+                if (!globalKey) return;
 
                 const groupedIds = Array.isArray(state.groupedIds) && state.groupedIds.length
                     ? state.groupedIds
@@ -4266,16 +4341,16 @@ const saveProfile = (e) => {
                 if (!winnerId || !loserId) return;
 
                 const pairKey = getPairKey(winnerId, loserId);
-                const updatedDirectMatchups = {
-                    ...(currentGlobalState?.directMatchups || {}),
-                    [pairKey]: {
-                        winnerId,
-                        loserId,
-                        reason: 'direct',
-                        playedAt: Date.now()
-                    }
+                const directRecord = {
+                    winnerId,
+                    loserId,
+                    reason: 'direct',
+                    playedAt: Date.now()
                 };
-
+                const updatedDirectMatchups = {
+                    ...(arenaGlobalState?.[globalKey]?.directMatchups || {}),
+                    [pairKey]: directRecord
+                };
                 const derivedState = buildArenaDerivedState(updatedDirectMatchups, getArenaOrderedProfileIds(perfiles));
                 const updatedMatchups = derivedState.matchups;
                 const updatedStats = derivedState.stats || {};
@@ -4299,19 +4374,11 @@ const saveProfile = (e) => {
                     ? [winnerId, winnerNextOpponentId]
                     : findNextPendingPairByGroups(groupedIds, state.matchups || {}, updatedMatchups);
                 const activeGroup = getGroupForPair(groupedIds, nextPair?.[0], nextPair?.[1]);
-                const nextGlobalState = {
-                    arenaName: globalKey,
-                    orderedIds: getArenaOrderedProfileIds(perfiles),
-                    directMatchups: derivedState.directMatchups,
-                    matchups: updatedMatchups,
-                    victoryGraph: derivedState.victoryGraph,
-                    stats: updatedStats
-                };
 
                 const nextArenaState = {
                     ...state,
                     groupedIds,
-                    directMatchups: nextGlobalState.directMatchups,
+                    directMatchups: derivedState.directMatchups,
                     stats: updatedStats,
                     matchups: updatedMatchups,
                     victoryGraph: derivedState.victoryGraph,
@@ -4321,37 +4388,24 @@ const saveProfile = (e) => {
                     activeGroupLabel: activeGroup ? `${activeGroup.typeLabel}: ${activeGroup.label}` : '',
                     isFinished: !nextPair
                 };
-                const nextArenaBattleState = {
-                    ...(arenaBattleState || {}),
-                    [arenaKey]: nextArenaState
-                };
-                const globalScoreMap = buildArenaScoreMapFromGlobalStats(arenaName, nextArenaBattleState);
-
-                setPerfiles(prev => prev.map(profile => {
-                    if (!profile?.firebaseId || !Object.prototype.hasOwnProperty.call(globalScoreMap, profile.firebaseId)) return profile;
-                    const nextScore = globalScoreMap[profile.firebaseId];
-                    return {
-                        ...profile,
-                        puntuaciones: { ...(profile.puntuaciones || {}), [arenaName]: nextScore }
-                    };
-                }));
-
-                Object.entries(globalScoreMap).forEach(([profileId, nextScore]) => {
-                    updateProfileArenaScore(profileId, arenaName, nextScore);
-                });
 
                 setArenaBattleState(prev => ({
                     ...prev,
                     [arenaKey]: nextArenaState
                 }));
-                setArenaGlobalState(prev => ({
-                    ...prev,
-                    [globalKey]: nextGlobalState
-                }));
 
                 Promise.all([
-                    db.ref(`arenaGlobalState/${globalKey}`).set(nextGlobalState),
-                    db.ref(`arenaBattleState/${arenaKey}`).set(nextArenaState)
+                    db.ref(`arenaGlobalState/${globalKey}/directMatchups/${pairKey}`).transaction((currentRecord) => {
+                        const normalizedCurrent = normalizeMatchupRecord(currentRecord);
+                        if (normalizedCurrent?.reason === 'direct') return currentRecord;
+                        return directRecord;
+                    }),
+                    db.ref(`arenaBattleState/${arenaKey}`).transaction((currentState) => {
+                        if (JSON.stringify(currentState || {}) !== JSON.stringify(state || {})) {
+                            return currentState;
+                        }
+                        return { ...(currentState || {}), ...nextArenaState };
+                    })
                 ])
                     .catch(error => console.error('No se pudo guardar avance de batallas:', error));
             };
@@ -4504,15 +4558,23 @@ const saveProfile = (e) => {
                     }));
 
                     await Promise.all([
-                        db.ref(`arenaGlobalState/${globalKey}`).set(nextGlobalState),
-                        db.ref(`arenaBattleState/${arenaKey}`).set(normalizedState)
+                        db.ref(`arenaGlobalState/${globalKey}/directMatchups/${pairKey}`).remove(),
+                        db.ref(`arenaGlobalState/${globalKey}`).update({
+                            arenaName: nextGlobalState.arenaName,
+                            orderedIds: nextGlobalState.orderedIds,
+                            matchups: nextGlobalState.matchups,
+                            victoryGraph: nextGlobalState.victoryGraph,
+                            stats: nextGlobalState.stats
+                        }),
+                        db.ref(`arenaBattleState/${arenaKey}`).transaction((currentState) => {
+                            if (JSON.stringify(currentState || {}) !== JSON.stringify(arenaState || {})) {
+                                return currentState;
+                            }
+                            return { ...(currentState || {}), ...normalizedState };
+                        })
                     ]);
 
-                    const nextArenaBattleState = {
-                        ...(arenaBattleState || {}),
-                        [arenaKey]: normalizedState
-                    };
-                    const globalScoreMap = buildArenaScoreMapFromGlobalStats(arenaName, nextArenaBattleState);
+                    const globalScoreMap = buildArenaScoreMapFromGlobalStats(arenaName, nextGlobalState);
                     await Promise.all(Object.entries(globalScoreMap).map(async ([profileId, nextScore]) => {
                         await db.ref(`perfiles/${profileId}/puntuaciones/${arenaName}`).set(nextScore);
                     }));
