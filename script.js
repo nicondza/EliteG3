@@ -234,11 +234,54 @@
         const getGalleryItemUrl = (item) => normalizeGalleryItem(item).url;
         const getGalleryItemLabel = (item) => normalizeGalleryItem(item).label;
         const getGalleryItemType = (item) => normalizeGalleryItem(item).type;
-        const getSafeGalleryArray = (gallery, key, fallbackType = 'image') => (
-            Array.isArray(gallery?.[key])
-                ? gallery[key].map((item) => normalizeGalleryItem(item, fallbackType)).filter((item) => item.url)
-                : []
-        );
+        const normalizeGalleryCollection = (collection, fallbackType = 'image') => {
+            if (Array.isArray(collection)) {
+                return collection
+                    .map((item, index) => {
+                        const key = item && typeof item === 'object' ? (item.sourceKey || item.itemId || String(index)) : String(index);
+                        return {
+                            ...normalizeGalleryItem(item, fallbackType),
+                            sourceKey: String(key),
+                            itemId: String(key),
+                            sourceIndex: index
+                        };
+                    })
+                    .filter((item) => item.url);
+            }
+            if (collection && typeof collection === 'object') {
+                return Object.entries(collection)
+                    .map(([key, item], index) => ({
+                        ...normalizeGalleryItem(item, fallbackType),
+                        sourceKey: key,
+                        itemId: key,
+                        sourceIndex: index
+                    }))
+                    .filter((item) => item.url);
+            }
+            return [];
+        };
+        const getSafeGalleryArray = (gallery, key, fallbackType = 'image') => normalizeGalleryCollection(gallery?.[key], fallbackType);
+        const getGalleryItemKey = (item, fallback = '') => String(item?.sourceKey || item?.itemId || fallback || '');
+        const getProfileGalleryEntries = (profile = {}, key = 'fotos', fallbackType = 'image') => getSafeGalleryArray(profile?.galeria || {}, key, fallbackType)
+            .map((item, index) => ({
+                ...item,
+                sourceTag: key,
+                sourceKey: getGalleryItemKey(item, String(index)),
+                itemId: getGalleryItemKey(item, String(index)),
+                sourceIndex: typeof item.sourceIndex === 'number' ? item.sourceIndex : index
+            }));
+        const serializeGalleryCollectionForFirebase = (collection, fallbackType = 'image') => {
+            return normalizeGalleryCollection(collection, fallbackType).reduce((acc, item, index) => {
+                const key = getGalleryItemKey(item, `local_${index}`);
+                acc[key] = normalizeGalleryItem(item, fallbackType);
+                return acc;
+            }, {});
+        };
+        const serializeGalleryForFirebase = (gallery = {}) => ({
+            fotos: serializeGalleryCollectionForFirebase(gallery?.fotos, 'image'),
+            gifs: serializeGalleryCollectionForFirebase(gallery?.gifs, 'image'),
+            videos: serializeGalleryCollectionForFirebase(gallery?.videos, 'video')
+        });
         const mapAnonymousGalleryToProfile = (gallery = {}) => ({
             firebaseId: ANON_PROFILE_ID,
             nombre: 'Anónimo',
@@ -294,16 +337,7 @@
             const tab = window.open('', '_blank');
             if (!tab) return;
             const profileId = profile?.firebaseId || profile?.id || '';
-            const galleryItems = Array.isArray(profile?.galeria?.fotos)
-                ? profile.galeria.fotos
-                    .map((item) => normalizeGalleryItem(item, 'image'))
-                    .filter((item) => item.url)
-                    .map((item, sourceIndex) => ({
-                        ...item,
-                        sourceTag: 'fotos',
-                        sourceIndex
-                    }))
-                : [];
+            const galleryItems = getProfileGalleryEntries(profile, 'fotos', 'image');
             const galleryPhotoItems = galleryItems.filter((item) => item.type === 'image' && item.sourceTag === 'fotos');
             const safeBattlePhotoPrefs = sanitizeBattlePhotoPreferences(profile?.batallaFotosPreferidas || profile?.galeria?.battlePhotoPreferences || {});
             const normalizedProfilePhotoUrl = getSafeImageSrc(String(profile?.fotos?.[0] || profile?.foto || '').trim(), '');
@@ -320,6 +354,7 @@
                         class="surface-panel rounded-xl overflow-hidden border border-cyan-200/20 text-left multimedia-thumb-btn"
                         data-url="${item.url}"
                         data-label="${item.label || ''}"
+                        data-key="${item.sourceKey || item.itemId || item.sourceIndex}"
                         data-index="${item.sourceIndex}"
                         data-tag="${item.sourceTag}"
                         data-media-type="${item.type || 'image'}"
@@ -340,6 +375,7 @@
                         class="surface-panel rounded-xl overflow-hidden border border-rose-300/35 text-left multimedia-thumb-btn multimedia-thumb-btn--broken"
                         data-url="${item.url}"
                         data-label="${item.label || ''}"
+                        data-key="${item.sourceKey || item.itemId || item.sourceIndex}"
                         data-index="${item.sourceIndex}"
                         data-tag="${item.sourceTag}"
                         data-media-type="${item.type || 'image'}"
@@ -477,9 +513,9 @@
                             const isImagePayload = (payload) => String(payload?.mediaType || '').trim() === 'image';
                             const assignToSlot = (payload = {}, slotId = '') => {
                                 if (!window.opener || !slotId || !isImagePayload(payload)) return false;
-                                const sourceIndex = Number(payload.sourceIndex);
-                                if (!Number.isInteger(sourceIndex) || sourceIndex < 0) return false;
-                                window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF', id: '${profileId}', slotId, index: sourceIndex, mediaType: 'image' }, '*');
+                                const selectedUrl = String(payload.url || '').trim();
+                                if (!selectedUrl) return false;
+                                window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF_BY_URL', id: '${profileId}', slotId, url: selectedUrl, mediaType: 'image' }, '*');
                                 return true;
                             };
                             const syncBrokenEmptyState = () => {
@@ -490,18 +526,13 @@
                                     .filter((card) => card.style.display !== 'none').length;
                                 empty.style.display = visibleBrokenCount ? 'none' : 'block';
                             };
-                            const saveGalleryItem = async ({ sourceTag = 'fotos', sourceIndex = -1, url = '', label = '' }) => {
-                                if (!dbRef || !profileId || sourceIndex < 0) return false;
-                                const galleryRef = dbRef.ref(\`perfiles/\${profileId}/galeria/\${sourceTag}\`);
-                                const snapshot = await galleryRef.once('value');
-                                const currentItems = Array.isArray(snapshot.val()) ? snapshot.val() : [];
-                                if (!currentItems[sourceIndex]) return false;
-                                const rawItem = currentItems[sourceIndex];
-                                const nextItem = typeof rawItem === 'string'
-                                    ? { url: String(url || '').trim(), label: normalizeLabel(label), type: 'image', autor: '' }
-                                    : { ...rawItem, url: String(url || '').trim(), label: normalizeLabel(label), autor: normalizeGalleryAuthor(rawItem?.autor) };
-                                currentItems[sourceIndex] = nextItem;
-                                await galleryRef.set(currentItems);
+                            const saveGalleryItem = async ({ sourceTag = 'fotos', itemId = '', url = '', label = '' }) => {
+                                const normalizedItemId = String(itemId || '').trim();
+                                if (!dbRef || !profileId || !normalizedItemId) return false;
+                                const normalizedUrl = String(url || '').trim();
+                                if (!normalizedUrl) return false;
+                                const galleryRef = dbRef.ref('perfiles/' + profileId + '/galeria/' + sourceTag + '/' + normalizedItemId);
+                                await galleryRef.update({ url: normalizedUrl, label: normalizeLabel(label), type: sourceTag === 'videos' ? 'video' : 'image' });
                                 return true;
                             };
                             let activeSlotSelectionId = '';
@@ -548,8 +579,8 @@
                 acc[slot.id] = slot;
                 return acc;
             }, {}))};
-                            const assignBattlePhotoFromGallery = async ({ slotId = '', sourceIndex = -1, mediaType = 'image', cardButton = null }) => {
-                                if (!slotId || sourceIndex < 0 || mediaType !== 'image') return false;
+                            const assignBattlePhotoFromGallery = async ({ slotId = '', itemId = '', mediaType = 'image', cardButton = null }) => {
+                                if (!slotId || mediaType !== 'image') return false;
                                 if (slotId === 'perfil') {
                                     window.alert('El casillero Perfil usa la foto principal del personaje.');
                                     return false;
@@ -563,7 +594,7 @@
                                         updateSlotCardAssignedState(slotId, selectedUrl);
                                     } else if (window.opener) {
                                         const selectedUrl = String(cardButton?.dataset.url || '').trim();
-                                        window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF', id: profileId, slotId, index: sourceIndex, mediaType: 'image' }, '*');
+                                        window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF_BY_URL', id: profileId, slotId, url: selectedUrl, mediaType: 'image' }, '*');
                                         updateSlotCardAssignedState(slotId, selectedUrl);
                                     } else {
                                         return false;
@@ -593,7 +624,7 @@
                             document.querySelectorAll('.multimedia-thumb-btn').forEach((button) => {
                                 button.addEventListener('dragstart', (event) => {
                                     const payload = {
-                                        sourceIndex: Number(button.dataset.index),
+                                        itemId: button.dataset.key || button.dataset.index || '',
                                         mediaType: button.dataset.mediaType || 'image',
                                         url: button.dataset.url || ''
                                     };
@@ -618,9 +649,9 @@
                                 }
                                 button.addEventListener('click', async () => {
                                     const sourceTag = button.dataset.tag || 'fotos';
-                                    const sourceIndex = Number(button.dataset.index);
+                                    const itemId = button.dataset.key || button.dataset.index || '';
                                     if (activeSlotSelectionId) {
-                                        const assigned = await assignBattlePhotoFromGallery({ slotId: activeSlotSelectionId, sourceIndex, mediaType: 'image', cardButton: button });
+                                        const assigned = await assignBattlePhotoFromGallery({ slotId: activeSlotSelectionId, itemId, mediaType: 'image', cardButton: button });
                                         if (assigned) return;
                                     }
                                     const currentUrl = button.dataset.url || '';
@@ -630,7 +661,7 @@
                                     const nextLabel = window.prompt('Nueva etiqueta (C, P, B, N, S, E, X):', currentLabel || 'C');
                                     if (nextLabel === null) return;
                                     try {
-                                        const saved = await saveGalleryItem({ sourceTag, sourceIndex, url: nextUrl, label: nextLabel });
+                                        const saved = await saveGalleryItem({ sourceTag, itemId, url: nextUrl, label: nextLabel });
                                         if (!saved) return;
                                         button.dataset.url = nextUrl.trim();
                                         button.dataset.label = normalizeLabel((nextLabel || '').trim().toUpperCase());
@@ -674,7 +705,7 @@
                                     if (button.dataset.mediaType !== 'image') return;
                                     clearTimeout(longPressTimer);
                                     touchPayload = {
-                                        sourceIndex: Number(button.dataset.index),
+                                        itemId: button.dataset.key || button.dataset.index || '',
                                         mediaType: button.dataset.mediaType || 'image',
                                         url: button.dataset.url || ''
                                     };
@@ -721,11 +752,7 @@
 
             if (!isOpen || !profile) return null;
 
-            const galleryItems = Array.isArray(profile?.galeria?.fotos)
-                ? profile.galeria.fotos
-                    .map((item) => normalizeGalleryItem(item, 'image'))
-                    .filter((item) => item.url)
-                : [];
+            const galleryItems = getProfileGalleryEntries(profile, 'fotos', 'image');
             const topScores = Object.entries(profile?.puntuaciones || {})
                 .map(([label, value]) => ({ label, value: Number(value) || 0 }))
                 .sort((a, b) => b.value - a.value)
@@ -824,11 +851,8 @@
         };
         const getBattlePhotoForArena = (profile, arenaName) => {
             const normalizedArena = (arenaName || '').trim().toLowerCase();
-            const galleryImages = Array.isArray(profile?.galeria?.fotos)
-                ? profile.galeria.fotos
-                    .map((item) => normalizeGalleryItem(item, 'image'))
-                    .filter((item) => item.type === 'image' && item.url)
-                : [];
+            const galleryImages = getProfileGalleryEntries(profile, 'fotos', 'image')
+                .filter((item) => item.type === 'image' && item.url);
             const profilePhoto = getSafeImageSrc(profile?.fotos?.[0], '');
             const fallbackPhoto = profilePhoto || 'https://via.placeholder.com/400x500';
 
@@ -1036,6 +1060,8 @@
                 return {
                     ...normalizedItem,
                     sourceTag: item?.sourceTag || (normalizedItem.type === 'video' ? 'videos' : 'fotos'),
+                    sourceKey: getGalleryItemKey(item, String(index)),
+                    itemId: getGalleryItemKey(item, String(index)),
                     sourceIndex: typeof item?.sourceIndex === 'number' ? item.sourceIndex : index
                 };
             }).filter(item => item.url);
@@ -1461,6 +1487,7 @@
                         <div
                             class="gallery-card"
                             data-gallery-index="${index}"
+                            data-source-key="${foto.sourceKey || foto.itemId || foto.sourceIndex}"
                             data-source-index="${foto.sourceIndex}"
                             data-media-type="${getGalleryItemType(foto)}"
                             data-url="${fotoUrl}"
@@ -1482,7 +1509,7 @@
                             onmouseout="this.style.transform='scale(1)'; this.style.boxShadow='0 0 15px ${estilo.sombra}'; this.style.zIndex='1';"
                         >
                            <button
-                            onclick="event.stopPropagation(); window.opener.postMessage({type: 'DELETE_IMAGE', index: ${foto.sourceIndex}, mediaType: '${getGalleryItemType(foto)}', id: '${editingId}'}, '*');"
+                            onclick="event.stopPropagation(); window.opener.postMessage({type: 'DELETE_IMAGE', itemId: '${foto.sourceKey || foto.itemId || foto.sourceIndex}', mediaType: '${getGalleryItemType(foto)}', id: '${editingId}'}, '*');"
                             style="
                                 position: absolute;
                                 top: 5px;
@@ -1650,9 +1677,9 @@
 
                     function assignToSlot(payload = {}, slotId = '') {
                         if (!slotId || !window.opener || !isImagePayload(payload)) return false;
-                        const sourceIndex = Number(payload.sourceIndex);
-                        if (!Number.isInteger(sourceIndex) || sourceIndex < 0) return false;
-                        window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF', id: '${editingId}', slotId, index: sourceIndex, mediaType: payload.mediaType || 'image' }, '*');
+                        const selectedUrl = String(payload.url || '').trim();
+                        if (!selectedUrl) return false;
+                        window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF_BY_URL', id: '${editingId}', slotId, url: selectedUrl, mediaType: payload.mediaType || 'image' }, '*');
                         activeSlotSelectionId = '';
                         const slotInput = document.getElementById('slotSelectionId');
                         if (slotInput) slotInput.value = '';
@@ -1663,7 +1690,7 @@
                     function tryAssignGalleryCardToActiveSlot(card) {
                         if (!card || !activeSlotSelectionId) return false;
                         const payload = {
-                            sourceIndex: Number(card.dataset.sourceIndex),
+                            itemId: card.dataset.sourceKey || card.dataset.sourceIndex || '',
                             mediaType: card.dataset.mediaType || 'image',
                             url: card.dataset.url || '',
                             compatibleSlots: card.dataset.compatibleSlots || ''
@@ -1761,7 +1788,7 @@
                         const card = event.target.closest('.gallery-card');
                         if (!card) return;
                         const payload = {
-                            sourceIndex: Number(card.dataset.sourceIndex),
+                            itemId: card.dataset.sourceKey || card.dataset.sourceIndex || '',
                             mediaType: card.dataset.mediaType || 'image',
                             url: card.dataset.url || '',
                             compatibleSlots: card.dataset.compatibleSlots || ''
@@ -1776,7 +1803,7 @@
                         if (!card || card.dataset.mediaType !== 'image') return;
                         clearTimeout(longPressTimer);
                         touchPayload = {
-                            sourceIndex: Number(card.dataset.sourceIndex),
+                            itemId: card.dataset.sourceKey || card.dataset.sourceIndex || '',
                             mediaType: card.dataset.mediaType || 'image',
                             url: card.dataset.url || '',
                             compatibleSlots: card.dataset.compatibleSlots || ''
@@ -2108,7 +2135,7 @@
                                 event.stopPropagation();
                                 window.opener.postMessage({
                                     type: 'DELETE_IMAGE',
-                                    index: Number(deleteButton.dataset.deleteIndex),
+                                    itemId: deleteButton.dataset.deleteKey || deleteButton.dataset.deleteIndex || '',
                                     mediaType: deleteButton.dataset.deleteMediaType,
                                     id: '${editingId}'
                                 }, '*');
@@ -2319,9 +2346,9 @@ const getInitialCatFormData = () => ({
                     estaturaCm: safeProfile.estaturaCm === undefined || safeProfile.estaturaCm === null ? '' : safeProfile.estaturaCm,
                     fotos: Array.isArray(safeProfile.fotos) ? safeProfile.fotos : [],
                     galeria: {
-                        fotos: Array.isArray(safeProfile?.galeria?.fotos) ? safeProfile.galeria.fotos : [],
-                        gifs: Array.isArray(safeProfile?.galeria?.gifs) ? safeProfile.galeria.gifs : [],
-                        videos: Array.isArray(safeProfile?.galeria?.videos) ? safeProfile.galeria.videos : []
+                        fotos: getSafeGalleryArray(safeProfile?.galeria || {}, 'fotos', 'image'),
+                        gifs: getSafeGalleryArray(safeProfile?.galeria || {}, 'gifs', 'image'),
+                        videos: getSafeGalleryArray(safeProfile?.galeria || {}, 'videos', 'video')
                     },
                     batallaFotosPreferidas: sanitizeBattlePhotoPreferences(safeProfile?.batallaFotosPreferidas),
                     puntuaciones: normalizedScores
@@ -2346,8 +2373,8 @@ const getInitialCatFormData = () => ({
                     profileName: profile?.nombre || '',
                     profession: profile?.profesion || '',
                     photos: [
-                        ...((profile?.galeria?.fotos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'image'), sourceTag: 'fotos', sourceIndex: index }))),
-                        ...((profile?.galeria?.videos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'video'), sourceTag: 'videos', sourceIndex: index })))
+                        ...getProfileGalleryEntries(profile, 'fotos', 'image'),
+                        ...getProfileGalleryEntries(profile, 'videos', 'video')
                     ],
                     editingId: profile?.firebaseId || profile?.id || '',
                     battlePhotoPrefs: profile?.batallaFotosPreferidas || profile?.galeria?.battlePhotoPreferences || {},
@@ -2396,102 +2423,116 @@ const getInitialCatFormData = () => ({
                     missing: withStatus.filter((row) => !row.isComplete)
                 };
             }, [formData]);
+            const getGalleryRefForProfile = (profileId, tag) => (
+                profileId === ANON_PROFILE_ID
+                    ? db.ref(`${ANON_GALLERY_NODE_PATH}/${tag}`)
+                    : db.ref(`perfiles/${profileId}/galeria/${tag}`)
+            );
+            const getGalleryFallbackType = (tag = '') => tag === 'videos' ? 'video' : 'image';
+            const normalizeGallerySnapshotEntries = (value, fallbackType = 'image') => normalizeGalleryCollection(value, fallbackType);
+            const migrateGalleryArrayToKeyedItems = async (galleryRef, arrayItems = [], fallbackType = 'image') => {
+                const keyedItems = {};
+                const keyByLegacyIndex = {};
+                arrayItems.forEach((item, index) => {
+                    const normalizedItem = normalizeGalleryItem(item, fallbackType);
+                    if (!normalizedItem.url) return;
+                    const key = galleryRef.push().key;
+                    keyedItems[key] = normalizedItem;
+                    keyByLegacyIndex[index] = key;
+                });
+                await galleryRef.set(keyedItems);
+                return { keyedItems, keyByLegacyIndex };
+            };
+            const resolveGalleryItemKey = async ({ galleryRef, itemId = '', sourceIndex, fallbackType = 'image' }) => {
+                const normalizedItemId = String(itemId || '').trim();
+                if (normalizedItemId && !Number.isInteger(Number(normalizedItemId))) {
+                    return normalizedItemId;
+                }
+                const snapshot = await galleryRef.once('value');
+                const currentValue = snapshot.val();
+                if (Array.isArray(currentValue)) {
+                    const { keyByLegacyIndex } = await migrateGalleryArrayToKeyedItems(galleryRef, currentValue, fallbackType);
+                    if (normalizedItemId && keyByLegacyIndex[Number(normalizedItemId)]) return keyByLegacyIndex[Number(normalizedItemId)];
+                    if (Number.isInteger(sourceIndex) && keyByLegacyIndex[sourceIndex]) return keyByLegacyIndex[sourceIndex];
+                    return '';
+                }
+                if (normalizedItemId) return normalizedItemId;
+                if (Number.isInteger(sourceIndex)) {
+                    const entries = normalizeGallerySnapshotEntries(currentValue, fallbackType);
+                    return entries[sourceIndex]?.sourceKey || '';
+                }
+                return '';
+            };
+            const getGalleryItemsForState = (value, fallbackType = 'image') => normalizeGallerySnapshotEntries(value, fallbackType);
+            const syncProfileGalleryState = (profileId, tag, items) => {
+                if (profileId !== editingId) return;
+                setFormData(prev => ({
+                    ...prev,
+                    galeria: {
+                        ...(prev.galeria || { fotos: [], gifs: [], videos: [] }),
+                        [tag]: items
+                    }
+                }));
+            };
+            const refreshGalleryStateFromRef = async ({ profileId, tag, galleryRef }) => {
+                const snapshot = await galleryRef.once('value');
+                const items = getGalleryItemsForState(snapshot.val(), getGalleryFallbackType(tag));
+                syncProfileGalleryState(profileId, tag, items);
+                return items;
+            };
             const addGalleryImage = async ({ profileId, url, tag = 'fotos', label = '', type = 'image', autor = '' }) => {
                 const normalizedUrl = (url || '').trim();
                 const normalizedLabel = GALLERY_LABELS.includes(label) ? label : '';
                 const normalizedType = detectGalleryItemType(normalizedUrl, type);
                 if (!profileId || !normalizedUrl) return [];
 
-                const galleryRef = db.ref(`perfiles/${profileId}/galeria/${tag}`);
-                const snapshot = await galleryRef.once('value');
-                const currentItems = snapshot.val() || [];
-                const updatedItems = [...currentItems, { url: normalizedUrl, label: normalizedLabel, type: normalizedType, autor: normalizeGalleryAuthor(autor) }];
-
-                await galleryRef.set(updatedItems);
-
-                if (profileId === editingId) {
-                    setFormData(prev => ({
-                        ...prev,
-                        galeria: {
-                            ...(prev.galeria || { fotos: [], gifs: [], videos: [] }),
-                            [tag]: updatedItems
-                        }
-                    }));
-                }
-
-                return updatedItems;
+                const galleryRef = getGalleryRefForProfile(profileId, tag);
+                await galleryRef.push({ url: normalizedUrl, label: normalizedLabel, type: normalizedType, autor: normalizeGalleryAuthor(autor) });
+                return refreshGalleryStateFromRef({ profileId, tag, galleryRef });
             };
 
-            const updateGalleryItemLabel = async ({ profileId, sourceTag, sourceIndex, label }) => {
-                if (!profileId || !sourceTag || !Number.isInteger(sourceIndex)) return;
+            const updateGalleryItemLabel = async ({ profileId, sourceTag, sourceIndex, sourceKey, itemId, label }) => {
+                if (!profileId || !sourceTag) return;
                 const normalizedLabel = GALLERY_LABELS.includes(label) ? label : '';
-                const galleryRef = db.ref(`perfiles/${profileId}/galeria/${sourceTag}`);
-                const snapshot = await galleryRef.once('value');
-                const currentItems = Array.isArray(snapshot.val()) ? snapshot.val() : [];
-                if (!currentItems[sourceIndex]) return;
+                const galleryRef = getGalleryRefForProfile(profileId, sourceTag);
+                const fallbackType = getGalleryFallbackType(sourceTag);
+                const resolvedKey = await resolveGalleryItemKey({ galleryRef, itemId: itemId || sourceKey, sourceIndex, fallbackType });
+                if (!resolvedKey) return;
 
-                const updatedItems = [...currentItems];
-                const normalizedItem = normalizeGalleryItem(updatedItems[sourceIndex], sourceTag === 'videos' ? 'video' : 'image');
-                updatedItems[sourceIndex] = {
-                    ...normalizedItem,
-                    label: normalizedLabel
-                };
-
-                await galleryRef.set(updatedItems);
-
-                if (profileId === editingId) {
-                    setFormData(prev => ({
-                        ...prev,
-                        galeria: {
-                            ...(prev.galeria || { fotos: [], gifs: [], videos: [] }),
-                            [sourceTag]: updatedItems
-                        }
-                    }));
-                }
+                await galleryRef.child(resolvedKey).update({ label: normalizedLabel });
+                await refreshGalleryStateFromRef({ profileId, tag: sourceTag, galleryRef });
             };
-            const updateGalleryItemUrl = async ({ profileId, sourceTag, sourceIndex, url }) => {
-                if (!profileId || !sourceTag || !Number.isInteger(sourceIndex)) return;
+            const updateGalleryItemUrl = async ({ profileId, sourceTag, sourceIndex, sourceKey, itemId, url }) => {
+                if (!profileId || !sourceTag) return;
                 const normalizedUrl = (url || '').trim();
                 if (!normalizedUrl) return;
 
-                const galleryRef = db.ref(`perfiles/${profileId}/galeria/${sourceTag}`);
-                const snapshot = await galleryRef.once('value');
-                const currentItems = Array.isArray(snapshot.val()) ? snapshot.val() : [];
-                if (!currentItems[sourceIndex]) return;
+                const galleryRef = getGalleryRefForProfile(profileId, sourceTag);
+                const fallbackType = getGalleryFallbackType(sourceTag);
+                const resolvedKey = await resolveGalleryItemKey({ galleryRef, itemId: itemId || sourceKey, sourceIndex, fallbackType });
+                if (!resolvedKey) return;
 
-                const updatedItems = [...currentItems];
-                const currentType = sourceTag === 'videos' ? 'video' : 'image';
-                const normalizedItem = normalizeGalleryItem(updatedItems[sourceIndex], currentType);
-                updatedItems[sourceIndex] = {
-                    ...normalizedItem,
+                await galleryRef.child(resolvedKey).update({
                     url: normalizedUrl,
-                    type: detectGalleryItemType(normalizedUrl, currentType)
-                };
-                await galleryRef.set(updatedItems);
-
-                if (profileId === editingId) {
-                    setFormData(prev => ({
-                        ...prev,
-                        galeria: {
-                            ...(prev.galeria || { fotos: [], gifs: [], videos: [] }),
-                            [sourceTag]: updatedItems
-                        }
-                    }));
-                }
+                    type: detectGalleryItemType(normalizedUrl, fallbackType)
+                });
+                await refreshGalleryStateFromRef({ profileId, tag: sourceTag, galleryRef });
             };
-            const removeGalleryItem = async ({ profileId, sourceTag, sourceIndex }) => {
-                if (!profileId || !sourceTag || !Number.isInteger(sourceIndex)) return;
-                const galleryRef = db.ref(`perfiles/${profileId}/galeria/${sourceTag}`);
-                const snapshot = await galleryRef.once('value');
-                const currentItems = Array.isArray(snapshot.val()) ? snapshot.val() : [];
-                const removedItem = currentItems[sourceIndex];
+            const removeGalleryItem = async ({ profileId, sourceTag, sourceIndex, sourceKey, itemId }) => {
+                if (!profileId || !sourceTag) return;
+                const galleryRef = getGalleryRefForProfile(profileId, sourceTag);
+                const fallbackType = getGalleryFallbackType(sourceTag);
+                const resolvedKey = await resolveGalleryItemKey({ galleryRef, itemId: itemId || sourceKey, sourceIndex, fallbackType });
+                if (!resolvedKey) return;
+
+                const removedSnapshot = await galleryRef.child(resolvedKey).once('value');
+                const removedItem = removedSnapshot.val();
                 if (!removedItem) return;
 
-                const remainingItems = currentItems.filter((_, index) => index !== sourceIndex);
-                await galleryRef.set(remainingItems);
+                await galleryRef.child(resolvedKey).remove();
 
-                const removedUrl = normalizeGalleryItem(removedItem, sourceTag === 'videos' ? 'video' : 'image').url;
-                if (removedUrl) {
+                const removedUrl = normalizeGalleryItem(removedItem, fallbackType).url;
+                if (removedUrl && profileId !== ANON_PROFILE_ID) {
                     const prefsRef = db.ref(`perfiles/${profileId}/batallaFotosPreferidas`);
                     const prefsSnapshot = await prefsRef.once('value');
                     const currentPrefs = sanitizeBattlePhotoPreferences(prefsSnapshot.val());
@@ -2507,6 +2548,7 @@ const getInitialCatFormData = () => ({
                     if (hasChanges) await prefsRef.set(updatedPrefs);
                 }
 
+                const remainingItems = await refreshGalleryStateFromRef({ profileId, tag: sourceTag, galleryRef });
                 if (profileId === editingId) {
                     setFormData(prev => ({
                         ...prev,
@@ -2578,15 +2620,12 @@ const getInitialCatFormData = () => ({
                 }
                 const tag = forcedTag || (inferredType === 'video' ? 'videos' : 'fotos');
                 const galleryRef = db.ref(`${ANON_GALLERY_NODE_PATH}/${tag}`);
-                const snapshot = await galleryRef.once('value');
-                const currentItems = Array.isArray(snapshot.val()) ? snapshot.val() : [];
-                const updatedItems = [...currentItems, {
+                await galleryRef.push({
                     url: normalizedUrl,
                     label: normalizedLabel,
                     type: inferredType,
                     autor: String(autor || '').trim()
-                }];
-                await galleryRef.set(updatedItems);
+                });
             };
             const handleAnonMediaSubmit = async (forcedTag = '') => {
                 setAnonMediaError('');
@@ -2668,8 +2707,8 @@ const getInitialCatFormData = () => ({
                         profileName: formData.nombre,
                         profession: formData.profesion,
                         photos: [
-                            ...(formData.galeria?.fotos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'image'), sourceTag: 'fotos', sourceIndex: index })),
-                            ...(formData.galeria?.videos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'video'), sourceTag: 'videos', sourceIndex: index }))
+                            ...getProfileGalleryEntries(formData, 'fotos', 'image'),
+                            ...getProfileGalleryEntries(formData, 'videos', 'video')
                         ],
                         editingId,
                         battlePhotoPrefs: formData.batallaFotosPreferidas,
@@ -2684,78 +2723,47 @@ const getInitialCatFormData = () => ({
                         const { url, id, label, mediaType, autor } = event.data;
                         const tag = mediaType === 'video' ? 'videos' : 'fotos';
                         if (!id) return;
-                        const galleryRef = id === ANON_PROFILE_ID
-                            ? db.ref(`${ANON_GALLERY_NODE_PATH}/${tag}`)
-                            : db.ref(`perfiles/${id}/galeria/${tag}`);
-                        const snapshot = await galleryRef.once('value');
-                        const currentPhotos = snapshot.val() || [];
                         const normalizedUrl = (url || '').trim();
                         if (!normalizedUrl) return;
-                        const updatedPhotos = [...currentPhotos, { url: normalizedUrl, label: GALLERY_LABELS.includes(label) ? label : '', type: detectGalleryItemType(normalizedUrl, mediaType), autor: normalizeGalleryAuthor(autor) }];
-
-                        await galleryRef.set(updatedPhotos);
-                        setFormData(prev => ({
-                            ...prev,
-                            galeria: { ...prev.galeria, [tag]: updatedPhotos }
-                        }));
+                        await addGalleryImage({
+                            profileId: id,
+                            url: normalizedUrl,
+                            tag,
+                            label: GALLERY_LABELS.includes(label) ? label : '',
+                            type: detectGalleryItemType(normalizedUrl, mediaType),
+                            autor
+                        });
                     }
 
                     if (event.data.type === 'DELETE_IMAGE') {
-                        const { index, id, mediaType } = event.data;
+                        const { index, itemId, sourceKey, id, mediaType } = event.data;
                         const tag = mediaType === 'video' ? 'videos' : 'fotos';
                         if (!id) return;
-                        const galleryRef = id === ANON_PROFILE_ID
-                            ? db.ref(`${ANON_GALLERY_NODE_PATH}/${tag}`)
-                            : db.ref(`perfiles/${id}/galeria/${tag}`);
-                        const snapshot = await galleryRef.once('value');
-                        const currentPhotos = snapshot.val() || [];
-                        const removedPhoto = currentPhotos[index];
-                        const nuevasFotos = currentPhotos.filter((_, i) => i !== index);
-
-                        await galleryRef.set(nuevasFotos);
-                        const removedUrl = normalizeGalleryItem(removedPhoto, mediaType).url;
-                        if (removedUrl && id !== ANON_PROFILE_ID) {
-                            const prefsRef = db.ref(`perfiles/${id}/batallaFotosPreferidas`);
-                            const prefsSnapshot = await prefsRef.once('value');
-                            const currentPrefs = sanitizeBattlePhotoPreferences(prefsSnapshot.val());
-                            const updatedPrefs = { ...currentPrefs };
-                            let hasChanges = false;
-                            Object.keys(updatedPrefs).forEach((slotId) => {
-                                if (updatedPrefs[slotId] === removedUrl) {
-                                    updatedPrefs[slotId] = '';
-                                    hasChanges = true;
-                                }
-                            });
-                            if (hasChanges) {
-                                await prefsRef.set(updatedPrefs);
-                            }
-                        }
-                        setFormData(prev => ({
-                            ...prev,
-                            galeria: { ...prev.galeria, [tag]: nuevasFotos },
-                            batallaFotosPreferidas: (() => {
-                                const currentPrefs = sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas);
-                                if (!removedUrl) return currentPrefs;
-                                const updatedPrefs = { ...currentPrefs };
-                                Object.keys(updatedPrefs).forEach((slotId) => {
-                                    if (updatedPrefs[slotId] === removedUrl) {
-                                        updatedPrefs[slotId] = '';
-                                    }
-                                });
-                                return updatedPrefs;
-                            })()
-                        }));
+                        await removeGalleryItem({
+                            profileId: id,
+                            sourceTag: tag,
+                            sourceIndex: Number.isInteger(index) ? index : Number(index),
+                            sourceKey,
+                            itemId
+                        });
                     }
 
                     if (event.data.type === 'SET_BATTLE_PHOTO_PREF') {
-                        const { id, slotId, index, mediaType } = event.data;
+                        const { id, slotId, index, itemId, sourceKey, mediaType } = event.data;
                         const slotConfig = getBattleSlotById(slotId);
-                        if (!id || id === ANON_PROFILE_ID || !slotConfig || !Number.isInteger(index)) return;
+                        if (!id || id === ANON_PROFILE_ID || !slotConfig) return;
                         const tag = mediaType === 'video' ? 'videos' : 'fotos';
                         const galleryRef = db.ref(`perfiles/${id}/galeria/${tag}`);
-                        const snapshot = await galleryRef.once('value');
-                        const currentItems = snapshot.val() || [];
-                        const selectedItem = normalizeGalleryItem(currentItems[index], mediaType);
+                        const fallbackType = getGalleryFallbackType(tag);
+                        const resolvedKey = await resolveGalleryItemKey({
+                            galleryRef,
+                            itemId: itemId || sourceKey,
+                            sourceIndex: Number.isInteger(index) ? index : Number(index),
+                            fallbackType
+                        });
+                        if (!resolvedKey) return;
+                        const selectedSnapshot = await galleryRef.child(resolvedKey).once('value');
+                        const selectedItem = normalizeGalleryItem(selectedSnapshot.val(), mediaType);
                         if (!selectedItem.url || selectedItem.type !== 'image') return;
                         const prefsRef = db.ref(`perfiles/${id}/batallaFotosPreferidas/${slotId}`);
                         await prefsRef.set(selectedItem.url);
@@ -2964,20 +2972,16 @@ const getInitialCatFormData = () => ({
                 return (perfiles || []).flatMap((perfil) => {
                     const sourceCharacterId = getGallerySourceCharacterId(perfil);
                     const galleryItems = [
-                        ...(Array.isArray(perfil?.galeria?.fotos)
-                            ? perfil.galeria.fotos.map((item, sourceIndex) => ({ item, sourceTag: 'fotos', sourceIndex, fallbackType: 'image' }))
-                            : []),
-                        ...(Array.isArray(perfil?.galeria?.gifs)
-                            ? perfil.galeria.gifs.map((item, sourceIndex) => ({ item, sourceTag: 'gifs', sourceIndex, fallbackType: 'image' }))
-                            : []),
-                        ...(Array.isArray(perfil?.galeria?.videos)
-                            ? perfil.galeria.videos.map((item, sourceIndex) => ({ item, sourceTag: 'videos', sourceIndex, fallbackType: 'video' }))
-                            : [])
+                        ...getProfileGalleryEntries(perfil, 'fotos', 'image').map((item) => ({ ...item, fallbackType: 'image' })),
+                        ...getProfileGalleryEntries(perfil, 'gifs', 'image').map((item) => ({ ...item, fallbackType: 'image' })),
+                        ...getProfileGalleryEntries(perfil, 'videos', 'video').map((item) => ({ ...item, fallbackType: 'video' }))
                     ];
 
-                    return galleryItems.map(({ item, sourceTag, sourceIndex, fallbackType }) => {
+                    return galleryItems.map((item) => {
+                        const { sourceTag, sourceIndex, sourceKey, itemId, fallbackType } = item;
                         const normalizedItem = normalizeGalleryItem(item, fallbackType);
-                        const entryId = `${perfil.firebaseId || perfil.nombre || 'perfil'}-${sourceTag}-${sourceIndex}`;
+                        const entryKey = sourceKey || itemId || sourceIndex;
+                        const entryId = `${perfil.firebaseId || perfil.nombre || 'perfil'}-${sourceTag}-${entryKey}`;
                         return {
                             id: entryId,
                             url: normalizedItem.url,
@@ -2991,6 +2995,8 @@ const getInitialCatFormData = () => ({
                             profileId: perfil.firebaseId,
                             sourceCharacterId,
                             sourceTag,
+                            sourceKey: sourceKey || itemId || String(sourceIndex),
+                            itemId: itemId || sourceKey || String(sourceIndex),
                             sourceIndex
                         };
                     });
@@ -3523,7 +3529,7 @@ const getInitialCatFormData = () => ({
             const showNextGalleryPhoto = () => setSelectedGalleryIndex((current) => getNextPlayableIndex(current, filteredGalleryPhotos, isGalleryRandom));
             const showPreviousGalleryPhoto = () => setSelectedGalleryIndex((current) => clampIndex((current ?? 0) - 1, filteredGalleryPhotos.length));
             const saveSelectedGalleryLabel = async () => {
-                if (!selectedGalleryPhoto?.profileId || !selectedGalleryPhoto?.sourceTag || !Number.isInteger(selectedGalleryPhoto?.sourceIndex)) return;
+                if (!selectedGalleryPhoto?.profileId || !selectedGalleryPhoto?.sourceTag || !selectedGalleryPhoto?.itemId) return;
                 const normalizedUrl = (galleryUrlDraft || '').trim();
                 if (!normalizedUrl) {
                     setGalleryEditorError('La URL no puede estar vacía.');
@@ -3540,6 +3546,8 @@ const getInitialCatFormData = () => ({
                         await updateGalleryItemUrl({
                             profileId: selectedGalleryPhoto.profileId,
                             sourceTag: selectedGalleryPhoto.sourceTag,
+                            itemId: selectedGalleryPhoto.itemId,
+                            sourceKey: selectedGalleryPhoto.sourceKey,
                             sourceIndex: selectedGalleryPhoto.sourceIndex,
                             url: normalizedUrl
                         });
@@ -3547,6 +3555,8 @@ const getInitialCatFormData = () => ({
                     await updateGalleryItemLabel({
                         profileId: selectedGalleryPhoto.profileId,
                         sourceTag: selectedGalleryPhoto.sourceTag,
+                        itemId: selectedGalleryPhoto.itemId,
+                        sourceKey: selectedGalleryPhoto.sourceKey,
                         sourceIndex: selectedGalleryPhoto.sourceIndex,
                         label: galleryLabelDraft
                     });
@@ -3581,6 +3591,8 @@ const getInitialCatFormData = () => ({
                         await updateGalleryItemUrl({
                             profileId: photo.profileId,
                             sourceTag: photo.sourceTag,
+                            itemId: photo.itemId,
+                            sourceKey: photo.sourceKey,
                             sourceIndex: photo.sourceIndex,
                             url: nextUrl
                         });
@@ -3606,6 +3618,8 @@ const getInitialCatFormData = () => ({
                     await removeGalleryItem({
                         profileId: photo.profileId,
                         sourceTag: photo.sourceTag,
+                        itemId: photo.itemId,
+                        sourceKey: photo.sourceKey,
                         sourceIndex: photo.sourceIndex
                     });
                 } catch (error) {
@@ -3626,7 +3640,7 @@ const getInitialCatFormData = () => ({
 
 const saveProfile = (e) => {
                 e.preventDefault();
-                const profileData = { ...formData };
+                const profileData = { ...formData, galeria: serializeGalleryForFirebase(formData.galeria) };
 
                 if (editingId) {
                     // Si estamos editando, buscamos el lugar exacto y lo actualizamos
@@ -4896,8 +4910,8 @@ const saveProfile = (e) => {
                                                             profileName: selectedTallerProfile?.nombre || '',
                                                             profession: selectedTallerProfile?.profesion || '',
                                                             photos: [
-                                                                ...((selectedTallerProfile?.galeria?.fotos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'image'), sourceTag: 'fotos', sourceIndex: index }))),
-                                                                ...((selectedTallerProfile?.galeria?.videos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'video'), sourceTag: 'videos', sourceIndex: index })))
+                                                                ...getProfileGalleryEntries(selectedTallerProfile, 'fotos', 'image'),
+                                                                ...getProfileGalleryEntries(selectedTallerProfile, 'videos', 'video')
                                                             ],
                                                             editingId: selectedTallerProfile?.firebaseId || selectedTallerProfile?.id || '',
                                                             battlePhotoPrefs: selectedTallerProfile?.batallaFotosPreferidas || selectedTallerProfile?.galeria?.battlePhotoPreferences || {},
