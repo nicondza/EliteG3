@@ -2292,6 +2292,14 @@ const getInitialCatFormData = () => ({
                 puntuaciones: createZeroScores()
             });
             const [formData, setFormData] = useState(getEmptyProfileFormData);
+            const editingIdRef = useRef(null);
+            const isModalOpenRef = useRef(false);
+            useEffect(() => {
+                editingIdRef.current = editingId;
+            }, [editingId]);
+            useEffect(() => {
+                isModalOpenRef.current = isModalOpen;
+            }, [isModalOpen]);
             useEffect(() => {
                 if (!selectedBattleScope) {
                     if (selectedBattleGroupKey) setSelectedBattleGroupKey('');
@@ -2326,6 +2334,31 @@ const getInitialCatFormData = () => ({
                     batallaFotosPreferidas: sanitizeBattlePhotoPreferences(safeProfile?.batallaFotosPreferidas),
                     puntuaciones: normalizedScores
                 };
+            };
+            const buildProfileBasicPayload = (profile = {}) => {
+                const normalizedProfilePhoto = String(profile?.fotos?.[0] || '').trim();
+                return {
+                    nombre: typeof profile.nombre === 'string' ? profile.nombre : '',
+                    nacionalidad: typeof profile.nacionalidad === 'string' ? profile.nacionalidad : '',
+                    ciudad: typeof profile.ciudad === 'string' ? profile.ciudad : '',
+                    profesion: typeof profile.profesion === 'string' ? profile.profesion : '',
+                    fechaNacimiento: typeof profile.fechaNacimiento === 'string' ? profile.fechaNacimiento : '',
+                    estaturaCm: profile.estaturaCm === undefined || profile.estaturaCm === null ? '' : profile.estaturaCm,
+                    fotos: normalizedProfilePhoto ? [normalizedProfilePhoto] : []
+                };
+            };
+            const syncProfilePhotoToGallery = async (profileId, profilePhotoUrl) => {
+                const normalizedProfilePhoto = String(profilePhotoUrl || '').trim();
+                if (!profileId || !normalizedProfilePhoto) return;
+
+                await db.ref(`perfiles/${profileId}/galeria/fotos`).transaction((currentItems) => {
+                    const currentPhotos = Array.isArray(currentItems)
+                        ? currentItems
+                        : Object.values(currentItems || {});
+                    const alreadyExists = currentPhotos.some((item) => normalizeGalleryItem(item, 'image').url === normalizedProfilePhoto);
+                    if (alreadyExists) return currentPhotos;
+                    return [...currentPhotos, { url: normalizedProfilePhoto, label: 'C', type: 'image' }];
+                });
             };
             const openProfileEditor = (contextProfile = {}) => {
                 if (contextProfile?.isAnonymousGallery || contextProfile?.firebaseId === ANON_PROFILE_ID) {
@@ -2694,10 +2727,12 @@ const getInitialCatFormData = () => ({
                         const updatedPhotos = [...currentPhotos, { url: normalizedUrl, label: GALLERY_LABELS.includes(label) ? label : '', type: detectGalleryItemType(normalizedUrl, mediaType), autor: normalizeGalleryAuthor(autor) }];
 
                         await galleryRef.set(updatedPhotos);
-                        setFormData(prev => ({
-                            ...prev,
-                            galeria: { ...prev.galeria, [tag]: updatedPhotos }
-                        }));
+                        if (id === editingIdRef.current) {
+                            setFormData(prev => ({
+                                ...prev,
+                                galeria: { ...prev.galeria, [tag]: updatedPhotos }
+                            }));
+                        }
                     }
 
                     if (event.data.type === 'DELETE_IMAGE') {
@@ -2730,21 +2765,23 @@ const getInitialCatFormData = () => ({
                                 await prefsRef.set(updatedPrefs);
                             }
                         }
-                        setFormData(prev => ({
-                            ...prev,
-                            galeria: { ...prev.galeria, [tag]: nuevasFotos },
-                            batallaFotosPreferidas: (() => {
-                                const currentPrefs = sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas);
-                                if (!removedUrl) return currentPrefs;
-                                const updatedPrefs = { ...currentPrefs };
-                                Object.keys(updatedPrefs).forEach((slotId) => {
-                                    if (updatedPrefs[slotId] === removedUrl) {
-                                        updatedPrefs[slotId] = '';
-                                    }
-                                });
-                                return updatedPrefs;
-                            })()
-                        }));
+                        if (id === editingIdRef.current) {
+                            setFormData(prev => ({
+                                ...prev,
+                                galeria: { ...prev.galeria, [tag]: nuevasFotos },
+                                batallaFotosPreferidas: (() => {
+                                    const currentPrefs = sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas);
+                                    if (!removedUrl) return currentPrefs;
+                                    const updatedPrefs = { ...currentPrefs };
+                                    Object.keys(updatedPrefs).forEach((slotId) => {
+                                        if (updatedPrefs[slotId] === removedUrl) {
+                                            updatedPrefs[slotId] = '';
+                                        }
+                                    });
+                                    return updatedPrefs;
+                                })()
+                            }));
+                        }
                     }
 
                     if (event.data.type === 'SET_BATTLE_PHOTO_PREF') {
@@ -2759,13 +2796,15 @@ const getInitialCatFormData = () => ({
                         if (!selectedItem.url || selectedItem.type !== 'image') return;
                         const prefsRef = db.ref(`perfiles/${id}/batallaFotosPreferidas/${slotId}`);
                         await prefsRef.set(selectedItem.url);
-                        setFormData(prev => ({
-                            ...prev,
-                            batallaFotosPreferidas: {
-                                ...sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas),
-                                [slotId]: selectedItem.url
-                            }
-                        }));
+                        if (id === editingIdRef.current) {
+                            setFormData(prev => ({
+                                ...prev,
+                                batallaFotosPreferidas: {
+                                    ...sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas),
+                                    [slotId]: selectedItem.url
+                                }
+                            }));
+                        }
                     }
 
                     if (event.data.type === 'SET_BATTLE_PHOTO_PREF_BY_URL') {
@@ -2776,13 +2815,15 @@ const getInitialCatFormData = () => ({
                         if (mediaType === 'video') return;
                         const prefsRef = db.ref(`perfiles/${id}/batallaFotosPreferidas/${slotId}`);
                         await prefsRef.set(normalizedUrl);
-                        setFormData(prev => ({
-                            ...prev,
-                            batallaFotosPreferidas: {
-                                ...sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas),
-                                [slotId]: normalizedUrl
-                            }
-                        }));
+                        if (id === editingIdRef.current) {
+                            setFormData(prev => ({
+                                ...prev,
+                                batallaFotosPreferidas: {
+                                    ...sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas),
+                                    [slotId]: normalizedUrl
+                                }
+                            }));
+                        }
                     }
 
                     if (event.data.type === 'CLEAR_BATTLE_PHOTO_PREF') {
@@ -2791,13 +2832,15 @@ const getInitialCatFormData = () => ({
                         if (!id || id === ANON_PROFILE_ID || !slotConfig) return;
                         const prefsRef = db.ref(`perfiles/${id}/batallaFotosPreferidas/${slotId}`);
                         await prefsRef.set('');
-                        setFormData(prev => ({
-                            ...prev,
-                            batallaFotosPreferidas: {
-                                ...sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas),
-                                [slotId]: ''
-                            }
-                        }));
+                        if (id === editingIdRef.current) {
+                            setFormData(prev => ({
+                                ...prev,
+                                batallaFotosPreferidas: {
+                                    ...sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas),
+                                    [slotId]: ''
+                                }
+                            }));
+                        }
                     }
                 };
 
@@ -2818,6 +2861,18 @@ const getInitialCatFormData = () => ({
                 perfilesRef.on('value', (snapshot) => {
                     perfilesData = snapshot.val() || {};
                     refreshPerfilesState();
+
+                    const currentEditingId = editingIdRef.current;
+                    const latestEditingProfile = currentEditingId ? perfilesData[currentEditingId] : null;
+                    if (isModalOpenRef.current && latestEditingProfile) {
+                        const latestFormData = mapProfileToFormData(latestEditingProfile);
+                        setFormData(prev => ({
+                            ...prev,
+                            galeria: latestFormData.galeria,
+                            batallaFotosPreferidas: latestFormData.batallaFotosPreferidas,
+                            puntuaciones: latestFormData.puntuaciones
+                        }));
+                    }
                 });
                 anonGalleryRef.on('value', (snapshot) => {
                     anonGalleryData = snapshot.val() || {};
@@ -3624,26 +3679,28 @@ const getInitialCatFormData = () => ({
                 return currentGalleryModeLabel;
             }, [galleryViewMode, selectedCharacterBuckets, activeGalleryBucket, isGalleryBucketMode, currentGalleryModeLabel]);
 
-const saveProfile = (e) => {
+            const saveProfile = async (e) => {
                 e.preventDefault();
-                const profileData = { ...formData };
+                const payloadCamposBasicos = buildProfileBasicPayload(formData);
 
-                if (editingId) {
-                    // Si estamos editando, buscamos el lugar exacto y lo actualizamos
-                    db.ref(`perfiles/${editingId}`).set(profileData)
-                        .then(() => {
-                            setIsModalOpen(false);
-                            setEditingId(null);
-                        })
-                        .catch(err => console.error("Error al excitar la base de datos:", err));
-                } else {
-                    // Si es nuevo, lo empujamos con fuerza a la colección
-                    db.ref('perfiles').push(profileData)
-                        .then(() => {
-                            setIsModalOpen(false);
-                            setFormData(getEmptyProfileFormData());
-                        })
-                        .catch(err => console.error("No pudo entrar el perfil:", err));
+                try {
+                    if (editingId) {
+                        await db.ref(`perfiles/${editingId}`).update(payloadCamposBasicos);
+                        await syncProfilePhotoToGallery(editingId, payloadCamposBasicos.fotos?.[0]);
+                        setIsModalOpen(false);
+                        setEditingId(null);
+                    } else {
+                        const profileData = {
+                            ...getEmptyProfileFormData(),
+                            ...payloadCamposBasicos
+                        };
+                        const newProfileRef = await db.ref('perfiles').push(profileData);
+                        await syncProfilePhotoToGallery(newProfileRef.key, payloadCamposBasicos.fotos?.[0]);
+                        setIsModalOpen(false);
+                        setFormData(getEmptyProfileFormData());
+                    }
+                } catch (err) {
+                    console.error(editingId ? "Error al actualizar la base de datos:" : "No pudo entrar el perfil:", err);
                 }
             };
             const saveCategory = async (e) => {
