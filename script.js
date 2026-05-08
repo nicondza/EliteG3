@@ -15,6 +15,7 @@
             firebase.initializeApp(firebaseConfig);
         }
         const db = firebase.database();
+        const storage = firebase.storage();
         const { useState, useEffect, useMemo, useRef } = React;
 
         const GALLERY_LABELS = ['C', 'P', 'B', 'N', 'S', 'E', 'X', 'R'];
@@ -234,11 +235,54 @@
         const getGalleryItemUrl = (item) => normalizeGalleryItem(item).url;
         const getGalleryItemLabel = (item) => normalizeGalleryItem(item).label;
         const getGalleryItemType = (item) => normalizeGalleryItem(item).type;
-        const getSafeGalleryArray = (gallery, key, fallbackType = 'image') => (
-            Array.isArray(gallery?.[key])
-                ? gallery[key].map((item) => normalizeGalleryItem(item, fallbackType)).filter((item) => item.url)
-                : []
-        );
+        const normalizeGalleryCollection = (collection, fallbackType = 'image') => {
+            if (Array.isArray(collection)) {
+                return collection
+                    .map((item, index) => {
+                        const key = item && typeof item === 'object' ? (item.sourceKey || item.itemId || String(index)) : String(index);
+                        return {
+                            ...normalizeGalleryItem(item, fallbackType),
+                            sourceKey: String(key),
+                            itemId: String(key),
+                            sourceIndex: index
+                        };
+                    })
+                    .filter((item) => item.url);
+            }
+            if (collection && typeof collection === 'object') {
+                return Object.entries(collection)
+                    .map(([key, item], index) => ({
+                        ...normalizeGalleryItem(item, fallbackType),
+                        sourceKey: key,
+                        itemId: key,
+                        sourceIndex: index
+                    }))
+                    .filter((item) => item.url);
+            }
+            return [];
+        };
+        const getSafeGalleryArray = (gallery, key, fallbackType = 'image') => normalizeGalleryCollection(gallery?.[key], fallbackType);
+        const getGalleryItemKey = (item, fallback = '') => String(item?.sourceKey || item?.itemId || fallback || '');
+        const getProfileGalleryEntries = (profile = {}, key = 'fotos', fallbackType = 'image') => getSafeGalleryArray(profile?.galeria || {}, key, fallbackType)
+            .map((item, index) => ({
+                ...item,
+                sourceTag: key,
+                sourceKey: getGalleryItemKey(item, String(index)),
+                itemId: getGalleryItemKey(item, String(index)),
+                sourceIndex: typeof item.sourceIndex === 'number' ? item.sourceIndex : index
+            }));
+        const serializeGalleryCollectionForFirebase = (collection, fallbackType = 'image') => {
+            return normalizeGalleryCollection(collection, fallbackType).reduce((acc, item, index) => {
+                const key = getGalleryItemKey(item, `local_${index}`);
+                acc[key] = normalizeGalleryItem(item, fallbackType);
+                return acc;
+            }, {});
+        };
+        const serializeGalleryForFirebase = (gallery = {}) => ({
+            fotos: serializeGalleryCollectionForFirebase(gallery?.fotos, 'image'),
+            gifs: serializeGalleryCollectionForFirebase(gallery?.gifs, 'image'),
+            videos: serializeGalleryCollectionForFirebase(gallery?.videos, 'video')
+        });
         const mapAnonymousGalleryToProfile = (gallery = {}) => ({
             firebaseId: ANON_PROFILE_ID,
             nombre: 'Anónimo',
@@ -294,16 +338,7 @@
             const tab = window.open('', '_blank');
             if (!tab) return;
             const profileId = profile?.firebaseId || profile?.id || '';
-            const galleryItems = Array.isArray(profile?.galeria?.fotos)
-                ? profile.galeria.fotos
-                    .map((item) => normalizeGalleryItem(item, 'image'))
-                    .filter((item) => item.url)
-                    .map((item, sourceIndex) => ({
-                        ...item,
-                        sourceTag: 'fotos',
-                        sourceIndex
-                    }))
-                : [];
+            const galleryItems = getProfileGalleryEntries(profile, 'fotos', 'image');
             const galleryPhotoItems = galleryItems.filter((item) => item.type === 'image' && item.sourceTag === 'fotos');
             const safeBattlePhotoPrefs = sanitizeBattlePhotoPreferences(profile?.batallaFotosPreferidas || profile?.galeria?.battlePhotoPreferences || {});
             const normalizedProfilePhotoUrl = getSafeImageSrc(String(profile?.fotos?.[0] || profile?.foto || '').trim(), '');
@@ -320,6 +355,7 @@
                         class="surface-panel rounded-xl overflow-hidden border border-cyan-200/20 text-left multimedia-thumb-btn"
                         data-url="${item.url}"
                         data-label="${item.label || ''}"
+                        data-key="${item.sourceKey || item.itemId || item.sourceIndex}"
                         data-index="${item.sourceIndex}"
                         data-tag="${item.sourceTag}"
                         data-media-type="${item.type || 'image'}"
@@ -340,6 +376,7 @@
                         class="surface-panel rounded-xl overflow-hidden border border-rose-300/35 text-left multimedia-thumb-btn multimedia-thumb-btn--broken"
                         data-url="${item.url}"
                         data-label="${item.label || ''}"
+                        data-key="${item.sourceKey || item.itemId || item.sourceIndex}"
                         data-index="${item.sourceIndex}"
                         data-tag="${item.sourceTag}"
                         data-media-type="${item.type || 'image'}"
@@ -477,9 +514,9 @@
                             const isImagePayload = (payload) => String(payload?.mediaType || '').trim() === 'image';
                             const assignToSlot = (payload = {}, slotId = '') => {
                                 if (!window.opener || !slotId || !isImagePayload(payload)) return false;
-                                const sourceIndex = Number(payload.sourceIndex);
-                                if (!Number.isInteger(sourceIndex) || sourceIndex < 0) return false;
-                                window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF', id: '${profileId}', slotId, index: sourceIndex, mediaType: 'image' }, '*');
+                                const selectedUrl = String(payload.url || '').trim();
+                                if (!selectedUrl) return false;
+                                window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF_BY_URL', id: '${profileId}', slotId, url: selectedUrl, mediaType: 'image' }, '*');
                                 return true;
                             };
                             const syncBrokenEmptyState = () => {
@@ -490,18 +527,13 @@
                                     .filter((card) => card.style.display !== 'none').length;
                                 empty.style.display = visibleBrokenCount ? 'none' : 'block';
                             };
-                            const saveGalleryItem = async ({ sourceTag = 'fotos', sourceIndex = -1, url = '', label = '' }) => {
-                                if (!dbRef || !profileId || sourceIndex < 0) return false;
-                                const galleryRef = dbRef.ref(\`perfiles/\${profileId}/galeria/\${sourceTag}\`);
-                                const snapshot = await galleryRef.once('value');
-                                const currentItems = Array.isArray(snapshot.val()) ? snapshot.val() : [];
-                                if (!currentItems[sourceIndex]) return false;
-                                const rawItem = currentItems[sourceIndex];
-                                const nextItem = typeof rawItem === 'string'
-                                    ? { url: String(url || '').trim(), label: normalizeLabel(label), type: 'image', autor: '' }
-                                    : { ...rawItem, url: String(url || '').trim(), label: normalizeLabel(label), autor: normalizeGalleryAuthor(rawItem?.autor) };
-                                currentItems[sourceIndex] = nextItem;
-                                await galleryRef.set(currentItems);
+                            const saveGalleryItem = async ({ sourceTag = 'fotos', itemId = '', url = '', label = '' }) => {
+                                const normalizedItemId = String(itemId || '').trim();
+                                if (!dbRef || !profileId || !normalizedItemId) return false;
+                                const normalizedUrl = String(url || '').trim();
+                                if (!normalizedUrl) return false;
+                                const galleryRef = dbRef.ref('perfiles/' + profileId + '/galeria/' + sourceTag + '/' + normalizedItemId);
+                                await galleryRef.update({ url: normalizedUrl, label: normalizeLabel(label), type: sourceTag === 'videos' ? 'video' : 'image' });
                                 return true;
                             };
                             let activeSlotSelectionId = '';
@@ -548,8 +580,8 @@
                 acc[slot.id] = slot;
                 return acc;
             }, {}))};
-                            const assignBattlePhotoFromGallery = async ({ slotId = '', sourceIndex = -1, mediaType = 'image', cardButton = null }) => {
-                                if (!slotId || sourceIndex < 0 || mediaType !== 'image') return false;
+                            const assignBattlePhotoFromGallery = async ({ slotId = '', itemId = '', mediaType = 'image', cardButton = null }) => {
+                                if (!slotId || mediaType !== 'image') return false;
                                 if (slotId === 'perfil') {
                                     window.alert('El casillero Perfil usa la foto principal del personaje.');
                                     return false;
@@ -563,7 +595,7 @@
                                         updateSlotCardAssignedState(slotId, selectedUrl);
                                     } else if (window.opener) {
                                         const selectedUrl = String(cardButton?.dataset.url || '').trim();
-                                        window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF', id: profileId, slotId, index: sourceIndex, mediaType: 'image' }, '*');
+                                        window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF_BY_URL', id: profileId, slotId, url: selectedUrl, mediaType: 'image' }, '*');
                                         updateSlotCardAssignedState(slotId, selectedUrl);
                                     } else {
                                         return false;
@@ -593,7 +625,7 @@
                             document.querySelectorAll('.multimedia-thumb-btn').forEach((button) => {
                                 button.addEventListener('dragstart', (event) => {
                                     const payload = {
-                                        sourceIndex: Number(button.dataset.index),
+                                        itemId: button.dataset.key || button.dataset.index || '',
                                         mediaType: button.dataset.mediaType || 'image',
                                         url: button.dataset.url || ''
                                     };
@@ -618,9 +650,9 @@
                                 }
                                 button.addEventListener('click', async () => {
                                     const sourceTag = button.dataset.tag || 'fotos';
-                                    const sourceIndex = Number(button.dataset.index);
+                                    const itemId = button.dataset.key || button.dataset.index || '';
                                     if (activeSlotSelectionId) {
-                                        const assigned = await assignBattlePhotoFromGallery({ slotId: activeSlotSelectionId, sourceIndex, mediaType: 'image', cardButton: button });
+                                        const assigned = await assignBattlePhotoFromGallery({ slotId: activeSlotSelectionId, itemId, mediaType: 'image', cardButton: button });
                                         if (assigned) return;
                                     }
                                     const currentUrl = button.dataset.url || '';
@@ -630,7 +662,7 @@
                                     const nextLabel = window.prompt('Nueva etiqueta (C, P, B, N, S, E, X):', currentLabel || 'C');
                                     if (nextLabel === null) return;
                                     try {
-                                        const saved = await saveGalleryItem({ sourceTag, sourceIndex, url: nextUrl, label: nextLabel });
+                                        const saved = await saveGalleryItem({ sourceTag, itemId, url: nextUrl, label: nextLabel });
                                         if (!saved) return;
                                         button.dataset.url = nextUrl.trim();
                                         button.dataset.label = normalizeLabel((nextLabel || '').trim().toUpperCase());
@@ -674,7 +706,7 @@
                                     if (button.dataset.mediaType !== 'image') return;
                                     clearTimeout(longPressTimer);
                                     touchPayload = {
-                                        sourceIndex: Number(button.dataset.index),
+                                        itemId: button.dataset.key || button.dataset.index || '',
                                         mediaType: button.dataset.mediaType || 'image',
                                         url: button.dataset.url || ''
                                     };
@@ -721,11 +753,7 @@
 
             if (!isOpen || !profile) return null;
 
-            const galleryItems = Array.isArray(profile?.galeria?.fotos)
-                ? profile.galeria.fotos
-                    .map((item) => normalizeGalleryItem(item, 'image'))
-                    .filter((item) => item.url)
-                : [];
+            const galleryItems = getProfileGalleryEntries(profile, 'fotos', 'image');
             const topScores = Object.entries(profile?.puntuaciones || {})
                 .map(([label, value]) => ({ label, value: Number(value) || 0 }))
                 .sort((a, b) => b.value - a.value)
@@ -824,11 +852,8 @@
         };
         const getBattlePhotoForArena = (profile, arenaName) => {
             const normalizedArena = (arenaName || '').trim().toLowerCase();
-            const galleryImages = Array.isArray(profile?.galeria?.fotos)
-                ? profile.galeria.fotos
-                    .map((item) => normalizeGalleryItem(item, 'image'))
-                    .filter((item) => item.type === 'image' && item.url)
-                : [];
+            const galleryImages = getProfileGalleryEntries(profile, 'fotos', 'image')
+                .filter((item) => item.type === 'image' && item.url);
             const profilePhoto = getSafeImageSrc(profile?.fotos?.[0], '');
             const fallbackPhoto = profilePhoto || 'https://via.placeholder.com/400x500';
 
@@ -1036,6 +1061,8 @@
                 return {
                     ...normalizedItem,
                     sourceTag: item?.sourceTag || (normalizedItem.type === 'video' ? 'videos' : 'fotos'),
+                    sourceKey: getGalleryItemKey(item, String(index)),
+                    itemId: getGalleryItemKey(item, String(index)),
                     sourceIndex: typeof item?.sourceIndex === 'number' ? item.sourceIndex : index
                 };
             }).filter(item => item.url);
@@ -1461,6 +1488,7 @@
                         <div
                             class="gallery-card"
                             data-gallery-index="${index}"
+                            data-source-key="${foto.sourceKey || foto.itemId || foto.sourceIndex}"
                             data-source-index="${foto.sourceIndex}"
                             data-media-type="${getGalleryItemType(foto)}"
                             data-url="${fotoUrl}"
@@ -1482,7 +1510,7 @@
                             onmouseout="this.style.transform='scale(1)'; this.style.boxShadow='0 0 15px ${estilo.sombra}'; this.style.zIndex='1';"
                         >
                            <button
-                            onclick="event.stopPropagation(); window.opener.postMessage({type: 'DELETE_IMAGE', index: ${foto.sourceIndex}, mediaType: '${getGalleryItemType(foto)}', id: '${editingId}'}, '*');"
+                            onclick="event.stopPropagation(); window.opener.postMessage({type: 'DELETE_IMAGE', itemId: '${foto.sourceKey || foto.itemId || foto.sourceIndex}', mediaType: '${getGalleryItemType(foto)}', id: '${editingId}'}, '*');"
                             style="
                                 position: absolute;
                                 top: 5px;
@@ -1651,9 +1679,9 @@
 
                     function assignToSlot(payload = {}, slotId = '') {
                         if (!slotId || !window.opener || !isImagePayload(payload)) return false;
-                        const sourceIndex = Number(payload.sourceIndex);
-                        if (!Number.isInteger(sourceIndex) || sourceIndex < 0) return false;
-                        window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF', id: '${editingId}', slotId, index: sourceIndex, mediaType: payload.mediaType || 'image' }, '*');
+                        const selectedUrl = String(payload.url || '').trim();
+                        if (!selectedUrl) return false;
+                        window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF_BY_URL', id: '${editingId}', slotId, url: selectedUrl, mediaType: payload.mediaType || 'image' }, '*');
                         activeSlotSelectionId = '';
                         const slotInput = document.getElementById('slotSelectionId');
                         if (slotInput) slotInput.value = '';
@@ -1664,7 +1692,7 @@
                     function tryAssignGalleryCardToActiveSlot(card) {
                         if (!card || !activeSlotSelectionId) return false;
                         const payload = {
-                            sourceIndex: Number(card.dataset.sourceIndex),
+                            itemId: card.dataset.sourceKey || card.dataset.sourceIndex || '',
                             mediaType: card.dataset.mediaType || 'image',
                             url: card.dataset.url || '',
                             compatibleSlots: card.dataset.compatibleSlots || ''
@@ -1718,22 +1746,42 @@
                                 alert('Uno o más archivos no son válidos. Usá imagen o video.');
                                 return;
                             }
-                            const oversizedFile = selectedFiles.find((file) => Number(file?.size || 0) > MAX_LOCAL_MEDIA_BYTES);
-                            if (oversizedFile) {
-                                alert('El archivo "' + (oversizedFile.name || 'seleccionado') + '" pesa más de 9 MB. Comprimilo o usá una URL para que Firebase pueda guardarlo correctamente.');
-                                return;
-                            }
-                            const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
-                                const reader = new FileReader();
-                                reader.onload = () => resolve({
-                                    url: String(reader.result || ''),
-                                    type: file.type && file.type.startsWith('video/') ? 'video' : 'image'
-                                });
-                                reader.onerror = () => reject(new Error('No se pudo leer uno de los archivos seleccionados.'));
-                                reader.readAsDataURL(file);
+                            const sanitizePathSegment = (value) => String(value || '')
+                                .trim()
+                                .normalize('NFD')
+                                .replace(/[\u0300-\u036f]/g, '')
+                                .replace(/[^a-zA-Z0-9._-]+/g, '-')
+                                .replace(/^-+|-+$/g, '')
+                                .slice(0, 80) || 'archivo';
+                            const uploadFile = (file) => new Promise((resolve, reject) => {
+                                const openerStorage = window.opener?.firebase?.storage ? window.opener.firebase.storage() : null;
+                                if (!openerStorage) {
+                                    reject(new Error('Firebase Storage no está disponible para subir el archivo.'));
+                                    return;
+                                }
+                                const extensionParts = String(file.name || '').split('.');
+                                const extension = extensionParts.length > 1 ? extensionParts.pop().toLowerCase() : (String(file.type || '').split('/').pop() || 'bin');
+                                const baseName = sanitizePathSegment(String(file.name || 'archivo').replace(/\.[^.]+$/, ''));
+                                const storagePath = 'perfiles/${editingId}/galeria/modal/' + Date.now() + '-' + Math.random().toString(36).slice(2, 10) + '-' + baseName + '.' + extension;
+                                const uploadTask = openerStorage.ref(storagePath).put(file);
+                                uploadTask.on(
+                                    window.opener.firebase.storage.TaskEvent.STATE_CHANGED,
+                                    null,
+                                    reject,
+                                    async () => {
+                                        try {
+                                            resolve({
+                                                url: await uploadTask.snapshot.ref.getDownloadURL(),
+                                                type: file.type && file.type.startsWith('video/') ? 'video' : 'image'
+                                            });
+                                        } catch (error) {
+                                            reject(error);
+                                        }
+                                    }
+                                );
                             });
 
-                            Promise.all(selectedFiles.map(readFileAsDataUrl))
+                            Promise.all(selectedFiles.map(uploadFile))
                                 .then((filesData) => {
                                     filesData.forEach((fileData, index) => {
                                         postMedia(fileData.url, fileData.type, index === 0);
@@ -1742,7 +1790,7 @@
                                     resetAddMediaModalFields();
                                 })
                                 .catch((error) => {
-                                    alert(error.message || 'No se pudo leer el archivo seleccionado.');
+                                    alert(error.message || 'No se pudo subir el archivo seleccionado. No se guardó la referencia.');
                                 });
                             return;
                         }
@@ -1767,7 +1815,7 @@
                         const card = event.target.closest('.gallery-card');
                         if (!card) return;
                         const payload = {
-                            sourceIndex: Number(card.dataset.sourceIndex),
+                            itemId: card.dataset.sourceKey || card.dataset.sourceIndex || '',
                             mediaType: card.dataset.mediaType || 'image',
                             url: card.dataset.url || '',
                             compatibleSlots: card.dataset.compatibleSlots || ''
@@ -1782,7 +1830,7 @@
                         if (!card || card.dataset.mediaType !== 'image') return;
                         clearTimeout(longPressTimer);
                         touchPayload = {
-                            sourceIndex: Number(card.dataset.sourceIndex),
+                            itemId: card.dataset.sourceKey || card.dataset.sourceIndex || '',
                             mediaType: card.dataset.mediaType || 'image',
                             url: card.dataset.url || '',
                             compatibleSlots: card.dataset.compatibleSlots || ''
@@ -2114,7 +2162,7 @@
                                 event.stopPropagation();
                                 window.opener.postMessage({
                                     type: 'DELETE_IMAGE',
-                                    index: Number(deleteButton.dataset.deleteIndex),
+                                    itemId: deleteButton.dataset.deleteKey || deleteButton.dataset.deleteIndex || '',
                                     mediaType: deleteButton.dataset.deleteMediaType,
                                     id: '${editingId}'
                                 }, '*');
@@ -2248,6 +2296,7 @@
             const [anonMediaLabel, setAnonMediaLabel] = useState(GALLERY_LABELS[0]);
             const [anonMediaAuthor, setAnonMediaAuthor] = useState('');
             const [anonMediaError, setAnonMediaError] = useState('');
+            const [anonMediaUploadProgress, setAnonMediaUploadProgress] = useState(null);
             const [anonUploadType, setAnonUploadType] = useState('');
             const [galleryAudioTracks, setGalleryAudioTracks] = useState([]);
             const [galleryAudioName, setGalleryAudioName] = useState('');
@@ -2255,6 +2304,8 @@
             const [galleryAudioUrl, setGalleryAudioUrl] = useState('');
             const [galleryAudioFile, setGalleryAudioFile] = useState(null);
             const [galleryAudioError, setGalleryAudioError] = useState('');
+            const [galleryAudioUploadProgress, setGalleryAudioUploadProgress] = useState(null);
+            const [profilePhotoUploadStatus, setProfilePhotoUploadStatus] = useState('');
             const [isGalleryMusicEnabled, setIsGalleryMusicEnabled] = useState(false);
             const [selectedGalleryAudioA, setSelectedGalleryAudioA] = useState('');
             const [selectedGalleryAudioB, setSelectedGalleryAudioB] = useState('');
@@ -2299,6 +2350,14 @@ const getInitialCatFormData = () => ({
                 puntuaciones: createZeroScores()
             });
             const [formData, setFormData] = useState(getEmptyProfileFormData);
+            const editingIdRef = useRef(null);
+            const isModalOpenRef = useRef(false);
+            useEffect(() => {
+                editingIdRef.current = editingId;
+            }, [editingId]);
+            useEffect(() => {
+                isModalOpenRef.current = isModalOpen;
+            }, [isModalOpen]);
             useEffect(() => {
                 if (!selectedBattleScope) {
                     if (selectedBattleGroupKey) setSelectedBattleGroupKey('');
@@ -2326,13 +2385,38 @@ const getInitialCatFormData = () => ({
                     estaturaCm: safeProfile.estaturaCm === undefined || safeProfile.estaturaCm === null ? '' : safeProfile.estaturaCm,
                     fotos: Array.isArray(safeProfile.fotos) ? safeProfile.fotos : [],
                     galeria: {
-                        fotos: Array.isArray(safeProfile?.galeria?.fotos) ? safeProfile.galeria.fotos : [],
-                        gifs: Array.isArray(safeProfile?.galeria?.gifs) ? safeProfile.galeria.gifs : [],
-                        videos: Array.isArray(safeProfile?.galeria?.videos) ? safeProfile.galeria.videos : []
+                        fotos: getSafeGalleryArray(safeProfile?.galeria || {}, 'fotos', 'image'),
+                        gifs: getSafeGalleryArray(safeProfile?.galeria || {}, 'gifs', 'image'),
+                        videos: getSafeGalleryArray(safeProfile?.galeria || {}, 'videos', 'video')
                     },
                     batallaFotosPreferidas: sanitizeBattlePhotoPreferences(safeProfile?.batallaFotosPreferidas),
                     puntuaciones: normalizedScores
                 };
+            };
+            const buildProfileBasicPayload = (profile = {}) => {
+                const normalizedProfilePhoto = String(profile?.fotos?.[0] || '').trim();
+                return {
+                    nombre: typeof profile.nombre === 'string' ? profile.nombre : '',
+                    nacionalidad: typeof profile.nacionalidad === 'string' ? profile.nacionalidad : '',
+                    ciudad: typeof profile.ciudad === 'string' ? profile.ciudad : '',
+                    profesion: typeof profile.profesion === 'string' ? profile.profesion : '',
+                    fechaNacimiento: typeof profile.fechaNacimiento === 'string' ? profile.fechaNacimiento : '',
+                    estaturaCm: profile.estaturaCm === undefined || profile.estaturaCm === null ? '' : profile.estaturaCm,
+                    fotos: normalizedProfilePhoto ? [normalizedProfilePhoto] : []
+                };
+            };
+            const syncProfilePhotoToGallery = async (profileId, profilePhotoUrl) => {
+                const normalizedProfilePhoto = String(profilePhotoUrl || '').trim();
+                if (!profileId || !normalizedProfilePhoto) return;
+
+                await db.ref(`perfiles/${profileId}/galeria/fotos`).transaction((currentItems) => {
+                    const currentPhotos = Array.isArray(currentItems)
+                        ? currentItems
+                        : Object.values(currentItems || {});
+                    const alreadyExists = currentPhotos.some((item) => normalizeGalleryItem(item, 'image').url === normalizedProfilePhoto);
+                    if (alreadyExists) return currentPhotos;
+                    return [...currentPhotos, { url: normalizedProfilePhoto, label: 'C', type: 'image' }];
+                });
             };
             const openProfileEditor = (contextProfile = {}) => {
                 if (contextProfile?.isAnonymousGallery || contextProfile?.firebaseId === ANON_PROFILE_ID) {
@@ -2355,8 +2439,8 @@ const getInitialCatFormData = () => ({
                     profileName: profile?.nombre || '',
                     profession: profile?.profesion || '',
                     photos: [
-                        ...((profile?.galeria?.fotos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'image'), sourceTag: 'fotos', sourceIndex: index }))),
-                        ...((profile?.galeria?.videos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'video'), sourceTag: 'videos', sourceIndex: index })))
+                        ...getProfileGalleryEntries(profile, 'fotos', 'image'),
+                        ...getProfileGalleryEntries(profile, 'videos', 'video')
                     ],
                     editingId: profileId,
                     battlePhotoPrefs: profile?.batallaFotosPreferidas || profile?.galeria?.battlePhotoPreferences || {},
@@ -2411,105 +2495,116 @@ const getInitialCatFormData = () => ({
                     missing: withStatus.filter((row) => !row.isComplete)
                 };
             }, [formData]);
+            const getGalleryRefForProfile = (profileId, tag) => (
+                profileId === ANON_PROFILE_ID
+                    ? db.ref(`${ANON_GALLERY_NODE_PATH}/${tag}`)
+                    : db.ref(`perfiles/${profileId}/galeria/${tag}`)
+            );
+            const getGalleryFallbackType = (tag = '') => tag === 'videos' ? 'video' : 'image';
+            const normalizeGallerySnapshotEntries = (value, fallbackType = 'image') => normalizeGalleryCollection(value, fallbackType);
+            const migrateGalleryArrayToKeyedItems = async (galleryRef, arrayItems = [], fallbackType = 'image') => {
+                const keyedItems = {};
+                const keyByLegacyIndex = {};
+                arrayItems.forEach((item, index) => {
+                    const normalizedItem = normalizeGalleryItem(item, fallbackType);
+                    if (!normalizedItem.url) return;
+                    const key = galleryRef.push().key;
+                    keyedItems[key] = normalizedItem;
+                    keyByLegacyIndex[index] = key;
+                });
+                await galleryRef.set(keyedItems);
+                return { keyedItems, keyByLegacyIndex };
+            };
+            const resolveGalleryItemKey = async ({ galleryRef, itemId = '', sourceIndex, fallbackType = 'image' }) => {
+                const normalizedItemId = String(itemId || '').trim();
+                if (normalizedItemId && !Number.isInteger(Number(normalizedItemId))) {
+                    return normalizedItemId;
+                }
+                const snapshot = await galleryRef.once('value');
+                const currentValue = snapshot.val();
+                if (Array.isArray(currentValue)) {
+                    const { keyByLegacyIndex } = await migrateGalleryArrayToKeyedItems(galleryRef, currentValue, fallbackType);
+                    if (normalizedItemId && keyByLegacyIndex[Number(normalizedItemId)]) return keyByLegacyIndex[Number(normalizedItemId)];
+                    if (Number.isInteger(sourceIndex) && keyByLegacyIndex[sourceIndex]) return keyByLegacyIndex[sourceIndex];
+                    return '';
+                }
+                if (normalizedItemId) return normalizedItemId;
+                if (Number.isInteger(sourceIndex)) {
+                    const entries = normalizeGallerySnapshotEntries(currentValue, fallbackType);
+                    return entries[sourceIndex]?.sourceKey || '';
+                }
+                return '';
+            };
+            const getGalleryItemsForState = (value, fallbackType = 'image') => normalizeGallerySnapshotEntries(value, fallbackType);
+            const syncProfileGalleryState = (profileId, tag, items) => {
+                if (profileId !== editingId) return;
+                setFormData(prev => ({
+                    ...prev,
+                    galeria: {
+                        ...(prev.galeria || { fotos: [], gifs: [], videos: [] }),
+                        [tag]: items
+                    }
+                }));
+            };
+            const refreshGalleryStateFromRef = async ({ profileId, tag, galleryRef }) => {
+                const snapshot = await galleryRef.once('value');
+                const items = getGalleryItemsForState(snapshot.val(), getGalleryFallbackType(tag));
+                syncProfileGalleryState(profileId, tag, items);
+                return items;
+            };
             const addGalleryImage = async ({ profileId, url, tag = 'fotos', label = '', type = 'image', autor = '' }) => {
                 const normalizedUrl = (url || '').trim();
                 const normalizedLabel = GALLERY_LABELS.includes(label) ? label : '';
                 const normalizedType = detectGalleryItemType(normalizedUrl, type);
                 if (!profileId || !normalizedUrl) return [];
 
-                const galleryRef = db.ref(`perfiles/${profileId}/galeria/${tag}`);
-                const newItem = { url: normalizedUrl, label: normalizedLabel, type: normalizedType, autor: normalizeGalleryAuthor(autor) };
-                const transactionResult = await galleryRef.transaction((currentItems) => {
-                    const safeItems = Array.isArray(currentItems) ? currentItems : [];
-                    return [...safeItems, newItem];
-                });
-                const updatedItems = Array.isArray(transactionResult?.snapshot?.val())
-                    ? transactionResult.snapshot.val()
-                    : [newItem];
-
-                if (profileId === editingId) {
-                    setFormData(prev => ({
-                        ...prev,
-                        galeria: {
-                            ...(prev.galeria || { fotos: [], gifs: [], videos: [] }),
-                            [tag]: updatedItems
-                        }
-                    }));
-                }
-
-                return updatedItems;
+                const galleryRef = getGalleryRefForProfile(profileId, tag);
+                await galleryRef.push({ url: normalizedUrl, label: normalizedLabel, type: normalizedType, autor: normalizeGalleryAuthor(autor) });
+                return refreshGalleryStateFromRef({ profileId, tag, galleryRef });
             };
 
-            const updateGalleryItemLabel = async ({ profileId, sourceTag, sourceIndex, label }) => {
-                if (!profileId || !sourceTag || !Number.isInteger(sourceIndex)) return;
+            const updateGalleryItemLabel = async ({ profileId, sourceTag, sourceIndex, sourceKey, itemId, label }) => {
+                if (!profileId || !sourceTag) return;
                 const normalizedLabel = GALLERY_LABELS.includes(label) ? label : '';
-                const galleryRef = db.ref(`perfiles/${profileId}/galeria/${sourceTag}`);
-                const snapshot = await galleryRef.once('value');
-                const currentItems = Array.isArray(snapshot.val()) ? snapshot.val() : [];
-                if (!currentItems[sourceIndex]) return;
+                const galleryRef = getGalleryRefForProfile(profileId, sourceTag);
+                const fallbackType = getGalleryFallbackType(sourceTag);
+                const resolvedKey = await resolveGalleryItemKey({ galleryRef, itemId: itemId || sourceKey, sourceIndex, fallbackType });
+                if (!resolvedKey) return;
 
-                const updatedItems = [...currentItems];
-                const normalizedItem = normalizeGalleryItem(updatedItems[sourceIndex], sourceTag === 'videos' ? 'video' : 'image');
-                updatedItems[sourceIndex] = {
-                    ...normalizedItem,
-                    label: normalizedLabel
-                };
-
-                await galleryRef.set(updatedItems);
-
-                if (profileId === editingId) {
-                    setFormData(prev => ({
-                        ...prev,
-                        galeria: {
-                            ...(prev.galeria || { fotos: [], gifs: [], videos: [] }),
-                            [sourceTag]: updatedItems
-                        }
-                    }));
-                }
+                await galleryRef.child(resolvedKey).update({ label: normalizedLabel });
+                await refreshGalleryStateFromRef({ profileId, tag: sourceTag, galleryRef });
             };
-            const updateGalleryItemUrl = async ({ profileId, sourceTag, sourceIndex, url }) => {
-                if (!profileId || !sourceTag || !Number.isInteger(sourceIndex)) return;
+            const updateGalleryItemUrl = async ({ profileId, sourceTag, sourceIndex, sourceKey, itemId, url }) => {
+                if (!profileId || !sourceTag) return;
                 const normalizedUrl = (url || '').trim();
                 if (!normalizedUrl) return;
 
-                const galleryRef = db.ref(`perfiles/${profileId}/galeria/${sourceTag}`);
-                const snapshot = await galleryRef.once('value');
-                const currentItems = Array.isArray(snapshot.val()) ? snapshot.val() : [];
-                if (!currentItems[sourceIndex]) return;
+                const galleryRef = getGalleryRefForProfile(profileId, sourceTag);
+                const fallbackType = getGalleryFallbackType(sourceTag);
+                const resolvedKey = await resolveGalleryItemKey({ galleryRef, itemId: itemId || sourceKey, sourceIndex, fallbackType });
+                if (!resolvedKey) return;
 
-                const updatedItems = [...currentItems];
-                const currentType = sourceTag === 'videos' ? 'video' : 'image';
-                const normalizedItem = normalizeGalleryItem(updatedItems[sourceIndex], currentType);
-                updatedItems[sourceIndex] = {
-                    ...normalizedItem,
+                await galleryRef.child(resolvedKey).update({
                     url: normalizedUrl,
-                    type: detectGalleryItemType(normalizedUrl, currentType)
-                };
-                await galleryRef.set(updatedItems);
-
-                if (profileId === editingId) {
-                    setFormData(prev => ({
-                        ...prev,
-                        galeria: {
-                            ...(prev.galeria || { fotos: [], gifs: [], videos: [] }),
-                            [sourceTag]: updatedItems
-                        }
-                    }));
-                }
+                    type: detectGalleryItemType(normalizedUrl, fallbackType)
+                });
+                await refreshGalleryStateFromRef({ profileId, tag: sourceTag, galleryRef });
             };
-            const removeGalleryItem = async ({ profileId, sourceTag, sourceIndex }) => {
-                if (!profileId || !sourceTag || !Number.isInteger(sourceIndex)) return;
-                const galleryRef = db.ref(`perfiles/${profileId}/galeria/${sourceTag}`);
-                const snapshot = await galleryRef.once('value');
-                const currentItems = Array.isArray(snapshot.val()) ? snapshot.val() : [];
-                const removedItem = currentItems[sourceIndex];
+            const removeGalleryItem = async ({ profileId, sourceTag, sourceIndex, sourceKey, itemId }) => {
+                if (!profileId || !sourceTag) return;
+                const galleryRef = getGalleryRefForProfile(profileId, sourceTag);
+                const fallbackType = getGalleryFallbackType(sourceTag);
+                const resolvedKey = await resolveGalleryItemKey({ galleryRef, itemId: itemId || sourceKey, sourceIndex, fallbackType });
+                if (!resolvedKey) return;
+
+                const removedSnapshot = await galleryRef.child(resolvedKey).once('value');
+                const removedItem = removedSnapshot.val();
                 if (!removedItem) return;
 
-                const remainingItems = currentItems.filter((_, index) => index !== sourceIndex);
-                await galleryRef.set(remainingItems);
+                await galleryRef.child(resolvedKey).remove();
 
-                const removedUrl = normalizeGalleryItem(removedItem, sourceTag === 'videos' ? 'video' : 'image').url;
-                if (removedUrl) {
+                const removedUrl = normalizeGalleryItem(removedItem, fallbackType).url;
+                if (removedUrl && profileId !== ANON_PROFILE_ID) {
                     const prefsRef = db.ref(`perfiles/${profileId}/batallaFotosPreferidas`);
                     const prefsSnapshot = await prefsRef.once('value');
                     const currentPrefs = sanitizeBattlePhotoPreferences(prefsSnapshot.val());
@@ -2525,6 +2620,7 @@ const getInitialCatFormData = () => ({
                     if (hasChanges) await prefsRef.set(updatedPrefs);
                 }
 
+                const remainingItems = await refreshGalleryStateFromRef({ profileId, tag: sourceTag, galleryRef });
                 if (profileId === editingId) {
                     setFormData(prev => ({
                         ...prev,
@@ -2546,22 +2642,6 @@ const getInitialCatFormData = () => ({
                     }));
                 }
             };
-            const MAX_LOCAL_MEDIA_BYTES = 9 * 1024 * 1024;
-            const isAllowedLocalGalleryFile = (file, allowedPrefixes = ['image/', 'video/']) => {
-                if (!file) return false;
-                const mime = String(file.type || '').toLowerCase();
-                return allowedPrefixes.some((prefix) => mime.startsWith(prefix));
-            };
-            const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
-                if (file && Number(file.size || 0) > MAX_LOCAL_MEDIA_BYTES) {
-                    reject(new Error('El archivo pesa más de 9 MB. Comprimilo o usá una URL para guardarlo en la galería.'));
-                    return;
-                }
-                const reader = new FileReader();
-                reader.onload = () => resolve(String(reader.result || ''));
-                reader.onerror = () => reject(new Error('No se pudo leer el archivo.'));
-                reader.readAsDataURL(file);
-            });
             const withProfilePhotoSyncedToGallery = (prevState, profilePhotoUrlRaw) => {
                 const normalizedProfileUrl = String(profilePhotoUrlRaw || '').trim();
                 const currentGallery = Array.isArray(prevState?.galeria?.fotos) ? prevState.galeria.fotos : [];
@@ -2571,7 +2651,7 @@ const getInitialCatFormData = () => ({
                 const alreadyExists = currentGallery.some((item) => normalizeGalleryItem(item, 'image').url === normalizedProfileUrl);
                 const nextGallery = alreadyExists
                     ? currentGallery
-                    : [...currentGallery, { url: normalizedProfileUrl, label: 'C', type: 'image' }];
+                    : [...currentGallery, { url: normalizedProfileUrl, label: 'C', type: 'image', autor: '' }];
                 return {
                     ...prevState,
                     fotos: [normalizedProfileUrl],
@@ -2581,14 +2661,28 @@ const getInitialCatFormData = () => ({
                     }
                 };
             };
+            const ensureProfileStorageId = () => {
+                if (editingId) return editingId;
+                const reservedProfileId = db.ref('perfiles').push().key;
+                setEditingId(reservedProfileId);
+                return reservedProfileId;
+            };
             const handleLocalProfilePhotoUpload = async (event) => {
                 const selectedFile = event.target.files?.[0];
                 if (!selectedFile) return;
+                const profileId = ensureProfileStorageId();
+                setProfilePhotoUploadStatus('Subiendo foto de perfil: 0%');
                 try {
-                    const dataUrl = await readFileAsDataUrl(selectedFile);
-                    setFormData(prev => withProfilePhotoSyncedToGallery(prev, dataUrl));
+                    const downloadURL = await uploadFileToStorage(
+                        selectedFile,
+                        `perfiles/${profileId}/galeria/perfil`,
+                        (progress) => setProfilePhotoUploadStatus(`Subiendo foto de perfil: ${progress}%`)
+                    );
+                    setFormData(prev => withProfilePhotoSyncedToGallery(prev, downloadURL));
+                    setProfilePhotoUploadStatus('Foto de perfil subida correctamente.');
                 } catch (error) {
-                    console.error('Error al cargar foto de perfil local:', error);
+                    console.error('Error al subir foto de perfil local:', error);
+                    setProfilePhotoUploadStatus(error?.message || 'No se pudo subir la foto de perfil. No se guardó la referencia.');
                 } finally {
                     event.target.value = '';
                 }
@@ -2606,41 +2700,42 @@ const getInitialCatFormData = () => ({
                 }
                 const tag = forcedTag || (inferredType === 'video' ? 'videos' : 'fotos');
                 const galleryRef = db.ref(`${ANON_GALLERY_NODE_PATH}/${tag}`);
-                const newItem = {
+                await galleryRef.push({
                     url: normalizedUrl,
                     label: normalizedLabel,
                     type: inferredType,
                     autor: String(autor || '').trim()
-                };
-                await galleryRef.transaction((currentItems) => {
-                    const safeItems = Array.isArray(currentItems) ? currentItems : [];
-                    return [...safeItems, newItem];
                 });
             };
             const handleAnonMediaSubmit = async (forcedTag = '') => {
                 setAnonMediaError('');
+                setAnonMediaUploadProgress(null);
                 try {
                     let finalUrl = String(anonMediaUrl || '').trim();
                     if (anonMediaSource === 'file') {
                         if (!anonMediaFile) throw new Error('Seleccioná un archivo local.');
-                        const allowedPrefixes = anonUploadType === 'imagen' ? ['image/'] : ['image/', 'video/'];
-                        if (!isAllowedLocalGalleryFile(anonMediaFile, allowedPrefixes)) {
-                            throw new Error('Archivo no válido. Usá imagen o video según la sección elegida.');
-                        }
-                        finalUrl = await readFileAsDataUrl(anonMediaFile);
+                        const storageTag = forcedTag || (anonMediaFile.type?.startsWith('video/') ? 'videos' : 'fotos');
+                        finalUrl = await uploadFileToStorage(
+                            anonMediaFile,
+                            `${ANON_GALLERY_NODE_PATH}/${storageTag}`,
+                            (progress) => setAnonMediaUploadProgress(progress)
+                        );
                     }
                     await addAnonymousGalleryItem({ url: finalUrl, label: anonMediaLabel, autor: anonMediaAuthor, forcedTag });
                     setAnonMediaUrl('');
                     setAnonMediaFile(null);
                     setAnonMediaAuthor('');
                     setAnonMediaSource('url');
+                    setAnonMediaUploadProgress(null);
                 } catch (error) {
+                    setAnonMediaUploadProgress(null);
                     setAnonMediaError(error?.message || 'No se pudo guardar en galería anónima.');
                 }
             };
             const addGalleryAudioTrack = async () => {
                 const normalizedName = String(galleryAudioName || '').trim();
                 setGalleryAudioError('');
+                setGalleryAudioUploadProgress(null);
                 if (!normalizedName) {
                     setGalleryAudioError('Completá el nombre del audio.');
                     return;
@@ -2652,7 +2747,11 @@ const getInitialCatFormData = () => ({
                             setGalleryAudioError('Seleccioná un archivo de audio.');
                             return;
                         }
-                        normalizedUrl = await readFileAsDataUrl(galleryAudioFile);
+                        normalizedUrl = await uploadFileToStorage(
+                            galleryAudioFile,
+                            'anonimo/audios',
+                            (progress) => setGalleryAudioUploadProgress(progress)
+                        );
                     } else if (!normalizedUrl) {
                         setGalleryAudioError('Completá la URL del audio.');
                         return;
@@ -2664,14 +2763,16 @@ const getInitialCatFormData = () => ({
                     const audioRef = db.ref(`${ANON_GALLERY_NODE_PATH}/audios`);
                     const snapshot = await audioRef.once('value');
                     const currentAudios = Array.isArray(snapshot.val()) ? snapshot.val() : [];
-                    const updatedAudios = [...currentAudios, { nombre: normalizedName, url: normalizedUrl }];
+                    const updatedAudios = [...currentAudios, { url: normalizedUrl, label: normalizedName, type: 'audio', autor: '' }];
                     await audioRef.set(updatedAudios);
                     setGalleryAudioName('');
                     setGalleryAudioUrl('');
                     setGalleryAudioFile(null);
                     setGalleryAudioSource('url');
+                    setGalleryAudioUploadProgress(null);
                 } catch (error) {
-                    setGalleryAudioError('No se pudo guardar el audio en Firebase.');
+                    setGalleryAudioUploadProgress(null);
+                    setGalleryAudioError(error?.message || 'No se pudo guardar el audio en Firebase.');
                 }
             };
             const handleDelete = async (id, e) => {
@@ -2701,8 +2802,8 @@ const getInitialCatFormData = () => ({
                         profileName: formData.nombre,
                         profession: formData.profesion,
                         photos: [
-                            ...(formData.galeria?.fotos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'image'), sourceTag: 'fotos', sourceIndex: index })),
-                            ...(formData.galeria?.videos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'video'), sourceTag: 'videos', sourceIndex: index }))
+                            ...getProfileGalleryEntries(formData, 'fotos', 'image'),
+                            ...getProfileGalleryEntries(formData, 'videos', 'video')
                         ],
                         editingId,
                         battlePhotoPrefs: formData.batallaFotosPreferidas,
@@ -2728,27 +2829,21 @@ const getInitialCatFormData = () => ({
                         const { url, id, label, mediaType, autor } = event.data;
                         const tag = mediaType === 'video' ? 'videos' : 'fotos';
                         if (!id) return;
-                        const galleryRef = id === ANON_PROFILE_ID
-                            ? db.ref(`${ANON_GALLERY_NODE_PATH}/${tag}`)
-                            : db.ref(`perfiles/${id}/galeria/${tag}`);
                         const normalizedUrl = (url || '').trim();
                         if (!normalizedUrl) return;
-                        const newPhoto = { url: normalizedUrl, label: GALLERY_LABELS.includes(label) ? label : '', type: detectGalleryItemType(normalizedUrl, mediaType), autor: normalizeGalleryAuthor(autor) };
-                        const transactionResult = await galleryRef.transaction((currentPhotos) => {
-                            const safePhotos = Array.isArray(currentPhotos) ? currentPhotos : [];
-                            return [...safePhotos, newPhoto];
-                        });
-                        const updatedPhotos = Array.isArray(transactionResult?.snapshot?.val())
-                            ? transactionResult.snapshot.val()
-                            : [newPhoto];
-                        setFormData(prev => ({
-                            ...prev,
-                            galeria: { ...prev.galeria, [tag]: updatedPhotos }
-                        }));
+                        const updatedPhotos = [...currentPhotos, { url: normalizedUrl, label: GALLERY_LABELS.includes(label) ? label : '', type: detectGalleryItemType(normalizedUrl, mediaType), autor: normalizeGalleryAuthor(autor) }];
+
+                        await galleryRef.set(updatedPhotos);
+                        if (id === editingIdRef.current) {
+                            setFormData(prev => ({
+                                ...prev,
+                                galeria: { ...prev.galeria, [tag]: updatedPhotos }
+                            }));
+                        }
                     }
 
                     if (event.data.type === 'DELETE_IMAGE') {
-                        const { index, id, mediaType } = event.data;
+                        const { index, itemId, sourceKey, id, mediaType } = event.data;
                         const tag = mediaType === 'video' ? 'videos' : 'fotos';
                         if (!id) return;
                         const galleryRef = id === ANON_PROFILE_ID
@@ -2777,42 +2872,53 @@ const getInitialCatFormData = () => ({
                                 await prefsRef.set(updatedPrefs);
                             }
                         }
-                        setFormData(prev => ({
-                            ...prev,
-                            galeria: { ...prev.galeria, [tag]: nuevasFotos },
-                            batallaFotosPreferidas: (() => {
-                                const currentPrefs = sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas);
-                                if (!removedUrl) return currentPrefs;
-                                const updatedPrefs = { ...currentPrefs };
-                                Object.keys(updatedPrefs).forEach((slotId) => {
-                                    if (updatedPrefs[slotId] === removedUrl) {
-                                        updatedPrefs[slotId] = '';
-                                    }
-                                });
-                                return updatedPrefs;
-                            })()
-                        }));
+                        if (id === editingIdRef.current) {
+                            setFormData(prev => ({
+                                ...prev,
+                                galeria: { ...prev.galeria, [tag]: nuevasFotos },
+                                batallaFotosPreferidas: (() => {
+                                    const currentPrefs = sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas);
+                                    if (!removedUrl) return currentPrefs;
+                                    const updatedPrefs = { ...currentPrefs };
+                                    Object.keys(updatedPrefs).forEach((slotId) => {
+                                        if (updatedPrefs[slotId] === removedUrl) {
+                                            updatedPrefs[slotId] = '';
+                                        }
+                                    });
+                                    return updatedPrefs;
+                                })()
+                            }));
+                        }
                     }
 
                     if (event.data.type === 'SET_BATTLE_PHOTO_PREF') {
-                        const { id, slotId, index, mediaType } = event.data;
+                        const { id, slotId, index, itemId, sourceKey, mediaType } = event.data;
                         const slotConfig = getBattleSlotById(slotId);
-                        if (!id || id === ANON_PROFILE_ID || !slotConfig || !Number.isInteger(index)) return;
+                        if (!id || id === ANON_PROFILE_ID || !slotConfig) return;
                         const tag = mediaType === 'video' ? 'videos' : 'fotos';
                         const galleryRef = db.ref(`perfiles/${id}/galeria/${tag}`);
-                        const snapshot = await galleryRef.once('value');
-                        const currentItems = snapshot.val() || [];
-                        const selectedItem = normalizeGalleryItem(currentItems[index], mediaType);
+                        const fallbackType = getGalleryFallbackType(tag);
+                        const resolvedKey = await resolveGalleryItemKey({
+                            galleryRef,
+                            itemId: itemId || sourceKey,
+                            sourceIndex: Number.isInteger(index) ? index : Number(index),
+                            fallbackType
+                        });
+                        if (!resolvedKey) return;
+                        const selectedSnapshot = await galleryRef.child(resolvedKey).once('value');
+                        const selectedItem = normalizeGalleryItem(selectedSnapshot.val(), mediaType);
                         if (!selectedItem.url || selectedItem.type !== 'image') return;
                         const prefsRef = db.ref(`perfiles/${id}/batallaFotosPreferidas/${slotId}`);
                         await prefsRef.set(selectedItem.url);
-                        setFormData(prev => ({
-                            ...prev,
-                            batallaFotosPreferidas: {
-                                ...sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas),
-                                [slotId]: selectedItem.url
-                            }
-                        }));
+                        if (id === editingIdRef.current) {
+                            setFormData(prev => ({
+                                ...prev,
+                                batallaFotosPreferidas: {
+                                    ...sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas),
+                                    [slotId]: selectedItem.url
+                                }
+                            }));
+                        }
                     }
 
                     if (event.data.type === 'SET_BATTLE_PHOTO_PREF_BY_URL') {
@@ -2823,13 +2929,15 @@ const getInitialCatFormData = () => ({
                         if (mediaType === 'video') return;
                         const prefsRef = db.ref(`perfiles/${id}/batallaFotosPreferidas/${slotId}`);
                         await prefsRef.set(normalizedUrl);
-                        setFormData(prev => ({
-                            ...prev,
-                            batallaFotosPreferidas: {
-                                ...sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas),
-                                [slotId]: normalizedUrl
-                            }
-                        }));
+                        if (id === editingIdRef.current) {
+                            setFormData(prev => ({
+                                ...prev,
+                                batallaFotosPreferidas: {
+                                    ...sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas),
+                                    [slotId]: normalizedUrl
+                                }
+                            }));
+                        }
                     }
 
                     if (event.data.type === 'CLEAR_BATTLE_PHOTO_PREF') {
@@ -2838,13 +2946,15 @@ const getInitialCatFormData = () => ({
                         if (!id || id === ANON_PROFILE_ID || !slotConfig) return;
                         const prefsRef = db.ref(`perfiles/${id}/batallaFotosPreferidas/${slotId}`);
                         await prefsRef.set('');
-                        setFormData(prev => ({
-                            ...prev,
-                            batallaFotosPreferidas: {
-                                ...sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas),
-                                [slotId]: ''
-                            }
-                        }));
+                        if (id === editingIdRef.current) {
+                            setFormData(prev => ({
+                                ...prev,
+                                batallaFotosPreferidas: {
+                                    ...sanitizeBattlePhotoPreferences(prev.batallaFotosPreferidas),
+                                    [slotId]: ''
+                                }
+                            }));
+                        }
                     }
                 };
 
@@ -2865,13 +2975,25 @@ const getInitialCatFormData = () => ({
                 perfilesRef.on('value', (snapshot) => {
                     perfilesData = snapshot.val() || {};
                     refreshPerfilesState();
+
+                    const currentEditingId = editingIdRef.current;
+                    const latestEditingProfile = currentEditingId ? perfilesData[currentEditingId] : null;
+                    if (isModalOpenRef.current && latestEditingProfile) {
+                        const latestFormData = mapProfileToFormData(latestEditingProfile);
+                        setFormData(prev => ({
+                            ...prev,
+                            galeria: latestFormData.galeria,
+                            batallaFotosPreferidas: latestFormData.batallaFotosPreferidas,
+                            puntuaciones: latestFormData.puntuaciones
+                        }));
+                    }
                 });
                 anonGalleryRef.on('value', (snapshot) => {
                     anonGalleryData = snapshot.val() || {};
                     const audios = Array.isArray(anonGalleryData?.audios)
                         ? anonGalleryData.audios
                             .map((audio) => ({
-                                nombre: String(audio?.nombre || '').trim(),
+                                nombre: String(audio?.label || audio?.nombre || '').trim(),
                                 url: String(audio?.url || '').trim()
                             }))
                             .filter((audio) => audio.nombre && audio.url)
@@ -3011,20 +3133,16 @@ const getInitialCatFormData = () => ({
                 return (perfiles || []).flatMap((perfil) => {
                     const sourceCharacterId = getGallerySourceCharacterId(perfil);
                     const galleryItems = [
-                        ...(Array.isArray(perfil?.galeria?.fotos)
-                            ? perfil.galeria.fotos.map((item, sourceIndex) => ({ item, sourceTag: 'fotos', sourceIndex, fallbackType: 'image' }))
-                            : []),
-                        ...(Array.isArray(perfil?.galeria?.gifs)
-                            ? perfil.galeria.gifs.map((item, sourceIndex) => ({ item, sourceTag: 'gifs', sourceIndex, fallbackType: 'image' }))
-                            : []),
-                        ...(Array.isArray(perfil?.galeria?.videos)
-                            ? perfil.galeria.videos.map((item, sourceIndex) => ({ item, sourceTag: 'videos', sourceIndex, fallbackType: 'video' }))
-                            : [])
+                        ...getProfileGalleryEntries(perfil, 'fotos', 'image').map((item) => ({ ...item, fallbackType: 'image' })),
+                        ...getProfileGalleryEntries(perfil, 'gifs', 'image').map((item) => ({ ...item, fallbackType: 'image' })),
+                        ...getProfileGalleryEntries(perfil, 'videos', 'video').map((item) => ({ ...item, fallbackType: 'video' }))
                     ];
 
-                    return galleryItems.map(({ item, sourceTag, sourceIndex, fallbackType }) => {
+                    return galleryItems.map((item) => {
+                        const { sourceTag, sourceIndex, sourceKey, itemId, fallbackType } = item;
                         const normalizedItem = normalizeGalleryItem(item, fallbackType);
-                        const entryId = `${perfil.firebaseId || perfil.nombre || 'perfil'}-${sourceTag}-${sourceIndex}`;
+                        const entryKey = sourceKey || itemId || sourceIndex;
+                        const entryId = `${perfil.firebaseId || perfil.nombre || 'perfil'}-${sourceTag}-${entryKey}`;
                         return {
                             id: entryId,
                             url: normalizedItem.url,
@@ -3038,6 +3156,8 @@ const getInitialCatFormData = () => ({
                             profileId: perfil.firebaseId,
                             sourceCharacterId,
                             sourceTag,
+                            sourceKey: sourceKey || itemId || String(sourceIndex),
+                            itemId: itemId || sourceKey || String(sourceIndex),
                             sourceIndex
                         };
                     });
@@ -3570,7 +3690,7 @@ const getInitialCatFormData = () => ({
             const showNextGalleryPhoto = () => setSelectedGalleryIndex((current) => getNextPlayableIndex(current, filteredGalleryPhotos, isGalleryRandom));
             const showPreviousGalleryPhoto = () => setSelectedGalleryIndex((current) => clampIndex((current ?? 0) - 1, filteredGalleryPhotos.length));
             const saveSelectedGalleryLabel = async () => {
-                if (!selectedGalleryPhoto?.profileId || !selectedGalleryPhoto?.sourceTag || !Number.isInteger(selectedGalleryPhoto?.sourceIndex)) return;
+                if (!selectedGalleryPhoto?.profileId || !selectedGalleryPhoto?.sourceTag || !selectedGalleryPhoto?.itemId) return;
                 const normalizedUrl = (galleryUrlDraft || '').trim();
                 if (!normalizedUrl) {
                     setGalleryEditorError('La URL no puede estar vacía.');
@@ -3587,6 +3707,8 @@ const getInitialCatFormData = () => ({
                         await updateGalleryItemUrl({
                             profileId: selectedGalleryPhoto.profileId,
                             sourceTag: selectedGalleryPhoto.sourceTag,
+                            itemId: selectedGalleryPhoto.itemId,
+                            sourceKey: selectedGalleryPhoto.sourceKey,
                             sourceIndex: selectedGalleryPhoto.sourceIndex,
                             url: normalizedUrl
                         });
@@ -3594,6 +3716,8 @@ const getInitialCatFormData = () => ({
                     await updateGalleryItemLabel({
                         profileId: selectedGalleryPhoto.profileId,
                         sourceTag: selectedGalleryPhoto.sourceTag,
+                        itemId: selectedGalleryPhoto.itemId,
+                        sourceKey: selectedGalleryPhoto.sourceKey,
                         sourceIndex: selectedGalleryPhoto.sourceIndex,
                         label: galleryLabelDraft
                     });
@@ -3628,6 +3752,8 @@ const getInitialCatFormData = () => ({
                         await updateGalleryItemUrl({
                             profileId: photo.profileId,
                             sourceTag: photo.sourceTag,
+                            itemId: photo.itemId,
+                            sourceKey: photo.sourceKey,
                             sourceIndex: photo.sourceIndex,
                             url: nextUrl
                         });
@@ -3653,6 +3779,8 @@ const getInitialCatFormData = () => ({
                     await removeGalleryItem({
                         profileId: photo.profileId,
                         sourceTag: photo.sourceTag,
+                        itemId: photo.itemId,
+                        sourceKey: photo.sourceKey,
                         sourceIndex: photo.sourceIndex
                     });
                 } catch (error) {
@@ -3671,26 +3799,28 @@ const getInitialCatFormData = () => ({
                 return currentGalleryModeLabel;
             }, [galleryViewMode, selectedCharacterBuckets, activeGalleryBucket, isGalleryBucketMode, currentGalleryModeLabel]);
 
-const saveProfile = (e) => {
+            const saveProfile = async (e) => {
                 e.preventDefault();
-                const profileData = { ...formData };
+                const payloadCamposBasicos = buildProfileBasicPayload(formData);
 
-                if (editingId) {
-                    // Si estamos editando, buscamos el lugar exacto y lo actualizamos
-                    db.ref(`perfiles/${editingId}`).set(profileData)
-                        .then(() => {
-                            setIsModalOpen(false);
-                            setEditingId(null);
-                        })
-                        .catch(err => console.error("Error al excitar la base de datos:", err));
-                } else {
-                    // Si es nuevo, lo empujamos con fuerza a la colección
-                    db.ref('perfiles').push(profileData)
-                        .then(() => {
-                            setIsModalOpen(false);
-                            setFormData(getEmptyProfileFormData());
-                        })
-                        .catch(err => console.error("No pudo entrar el perfil:", err));
+                try {
+                    if (editingId) {
+                        await db.ref(`perfiles/${editingId}`).update(payloadCamposBasicos);
+                        await syncProfilePhotoToGallery(editingId, payloadCamposBasicos.fotos?.[0]);
+                        setIsModalOpen(false);
+                        setEditingId(null);
+                    } else {
+                        const profileData = {
+                            ...getEmptyProfileFormData(),
+                            ...payloadCamposBasicos
+                        };
+                        const newProfileRef = await db.ref('perfiles').push(profileData);
+                        await syncProfilePhotoToGallery(newProfileRef.key, payloadCamposBasicos.fotos?.[0]);
+                        setIsModalOpen(false);
+                        setFormData(getEmptyProfileFormData());
+                    }
+                } catch (err) {
+                    console.error(editingId ? "Error al actualizar la base de datos:" : "No pudo entrar el perfil:", err);
                 }
             };
             const saveCategory = async (e) => {
@@ -4062,27 +4192,18 @@ const saveProfile = (e) => {
                 const nextPlayedAt = normalizedNext.playedAt ?? 0;
                 return nextPlayedAt >= prevPlayedAt ? normalizedNext : normalizedPrevious;
             };
-            const getGlobalArenaDerivedState = (arenaName, sourceArenaBattleState = arenaBattleState) => {
+            const getGlobalArenaDerivedState = (arenaName, sourceArenaGlobalState = null) => {
                 const normalizedArena = String(arenaName || '').trim();
                 if (!normalizedArena) {
                     return buildArenaDerivedState({}, []);
                 }
 
-                const mergedDirectMatchups = {};
-                Object.entries(sourceArenaBattleState || {}).forEach(([arenaStateKey, state]) => {
-                    if (!isArenaStateKeyForArena(arenaStateKey, normalizedArena)) return;
-                    const directMatchups = state?.directMatchups || {};
-                    Object.entries(directMatchups).forEach(([pairKey, rawRecord]) => {
-                        mergedDirectMatchups[pairKey] = mergeDirectMatchupRecord(mergedDirectMatchups[pairKey], rawRecord);
-                    });
-                });
+                const globalKey = getArenaGlobalKey(normalizedArena);
+                const globalStateForArena = sourceArenaGlobalState || arenaGlobalState?.[globalKey] || {};
+                const directMatchups = globalStateForArena?.directMatchups || globalStateForArena?.matchups || {};
+                const allProfileIds = getArenaOrderedProfileIds(perfiles);
 
-                const allProfileIds = [...(perfiles || [])]
-                    .map((profile) => profile?.firebaseId)
-                    .filter(Boolean)
-                    .sort((a, b) => String(a).localeCompare(String(b), 'es', { sensitivity: 'base' }));
-
-                return buildArenaDerivedState(mergedDirectMatchups, allProfileIds);
+                return buildArenaDerivedState(directMatchups, allProfileIds);
             };
             const getArenaStats = (arenaName, profileId) => {
                 const globalStats = getGlobalArenaDerivedState(arenaName).stats || {};
@@ -4090,8 +4211,8 @@ const saveProfile = (e) => {
                 const score = stats.battles ? Math.round((stats.wins / stats.battles) * 100) : 0;
                 return { ...stats, score };
             };
-            const buildArenaScoreMapFromGlobalStats = (arenaName, sourceArenaBattleState = arenaBattleState) => {
-                const globalStats = getGlobalArenaDerivedState(arenaName, sourceArenaBattleState).stats || {};
+            const buildArenaScoreMapFromGlobalStats = (arenaName, sourceArenaGlobalState = null) => {
+                const globalStats = getGlobalArenaDerivedState(arenaName, sourceArenaGlobalState).stats || {};
                 return [...(perfiles || [])]
                     .filter((profile) => profile?.firebaseId)
                     .reduce((acc, profile) => {
@@ -4180,8 +4301,12 @@ const saveProfile = (e) => {
 
                     repairedStates[arenaKey] = normalized;
                     updates.push(
-                        db.ref(`arenaBattleState/${arenaKey}`).set(normalized)
-                            .catch(error => console.error('No se pudo normalizar el estado del arena:', error))
+                        db.ref(`arenaBattleState/${arenaKey}`).transaction((currentState) => {
+                            if (JSON.stringify(currentState || {}) !== JSON.stringify(state || {})) {
+                                return currentState;
+                            }
+                            return { ...(currentState || {}), ...normalized };
+                        }).catch(error => console.error('No se pudo normalizar el estado del arena:', error))
                     );
                 });
 
@@ -4194,6 +4319,82 @@ const saveProfile = (e) => {
 
                 Promise.all(updates).catch(() => {});
             }, [arenaBattleState, arenaGlobalState, perfiles]);
+
+            useEffect(() => {
+                if (!perfiles.length) return;
+
+                const localGlobalUpdates = {};
+                const derivedWrites = [];
+                const scoreWrites = [];
+                const localScoreMaps = {};
+
+                Object.entries(arenaGlobalState || {}).forEach(([globalKey, rawGlobalState]) => {
+                    const normalizedGlobal = normalizeArenaGlobalState(globalKey, rawGlobalState || {});
+                    if (!normalizedGlobal) return;
+
+                    const derivedPatch = {
+                        arenaName: normalizedGlobal.arenaName,
+                        orderedIds: normalizedGlobal.orderedIds,
+                        matchups: normalizedGlobal.matchups,
+                        victoryGraph: normalizedGlobal.victoryGraph,
+                        stats: normalizedGlobal.stats
+                    };
+                    const remoteDerived = {
+                        arenaName: rawGlobalState?.arenaName,
+                        orderedIds: rawGlobalState?.orderedIds,
+                        matchups: rawGlobalState?.matchups,
+                        victoryGraph: rawGlobalState?.victoryGraph,
+                        stats: rawGlobalState?.stats
+                    };
+                    const directMatchupsChanged = JSON.stringify(rawGlobalState?.directMatchups || {}) !== JSON.stringify(normalizedGlobal.directMatchups || {});
+                    const derivedChanged = JSON.stringify(remoteDerived) !== JSON.stringify(derivedPatch);
+
+                    if (directMatchupsChanged || derivedChanged) {
+                        localGlobalUpdates[globalKey] = {
+                            ...(rawGlobalState || {}),
+                            directMatchups: normalizedGlobal.directMatchups,
+                            ...derivedPatch
+                        };
+                    }
+
+                    if (derivedChanged) {
+                        derivedWrites.push(
+                            db.ref(`arenaGlobalState/${globalKey}`).update(derivedPatch)
+                                .catch(error => console.error('No se pudo actualizar derivados del arena:', error))
+                        );
+                    }
+
+                    const scoreMap = buildArenaScoreMapFromGlobalStats(globalKey, normalizedGlobal);
+                    localScoreMaps[globalKey] = scoreMap;
+                    Object.entries(scoreMap).forEach(([profileId, nextScore]) => {
+                        const profile = (perfiles || []).find((item) => item?.firebaseId === profileId);
+                        if (Number(profile?.puntuaciones?.[globalKey]) === Number(nextScore)) return;
+                        scoreWrites.push(updateProfileArenaScore(profileId, globalKey, nextScore));
+                    });
+                });
+
+                if (Object.keys(localGlobalUpdates).length) {
+                    setArenaGlobalState(prev => ({ ...prev, ...localGlobalUpdates }));
+                }
+
+                if (Object.keys(localScoreMaps).length) {
+                    setPerfiles(prev => prev.map(profile => {
+                        if (!profile?.firebaseId) return profile;
+                        const nextScores = { ...(profile.puntuaciones || {}) };
+                        let changed = false;
+                        Object.entries(localScoreMaps).forEach(([arenaName, scoreMap]) => {
+                            if (!Object.prototype.hasOwnProperty.call(scoreMap, profile.firebaseId)) return;
+                            const nextScore = scoreMap[profile.firebaseId];
+                            if (Number(nextScores[arenaName]) === Number(nextScore)) return;
+                            nextScores[arenaName] = nextScore;
+                            changed = true;
+                        });
+                        return changed ? { ...profile, puntuaciones: nextScores } : profile;
+                    }));
+                }
+
+                Promise.all([...derivedWrites, ...scoreWrites]).catch(() => {});
+            }, [arenaGlobalState, perfiles]);
 
             useEffect(() => {
                 if (!perfiles.length) return;
@@ -4225,8 +4426,10 @@ const saveProfile = (e) => {
                     if (!normalizedGlobal) return;
                     localUpdates[globalKey] = normalizedGlobal;
                     updates.push(
-                        db.ref(`arenaGlobalState/${globalKey}`).set(normalizedGlobal)
-                            .catch(error => console.error('No se pudo migrar arenaGlobalState:', error))
+                        db.ref(`arenaGlobalState/${globalKey}`).transaction((currentGlobal) => {
+                            if (currentGlobal) return currentGlobal;
+                            return normalizedGlobal;
+                        }).catch(error => console.error('No se pudo migrar arenaGlobalState:', error))
                     );
                 });
 
@@ -4280,8 +4483,10 @@ const saveProfile = (e) => {
                         ...prev,
                         [globalKey]: normalizedGlobal
                     }));
-                    db.ref(`arenaGlobalState/${globalKey}`).set(normalizedGlobal)
-                        .catch(error => console.error('No se pudo guardar arenaGlobalState inicial:', error));
+                    db.ref(`arenaGlobalState/${globalKey}`).transaction((currentGlobal) => {
+                        if (currentGlobal) return currentGlobal;
+                        return normalizedGlobal;
+                    }).catch(error => console.error('No se pudo guardar arenaGlobalState inicial:', error));
                 }
 
                 db.ref(`arenaBattleState/${arenaKey}`).set(nextArenaState)
@@ -4302,7 +4507,7 @@ const saveProfile = (e) => {
                 const state = arenaBattleState[arenaKey];
                 if (!state || state.isFinished) return;
                 const globalKey = getArenaGlobalKey(arenaName);
-                const currentGlobalState = normalizeArenaGlobalState(arenaName, arenaGlobalState?.[globalKey] || {});
+                if (!globalKey) return;
 
                 const groupedIds = Array.isArray(state.groupedIds) && state.groupedIds.length
                     ? state.groupedIds
@@ -4313,16 +4518,16 @@ const saveProfile = (e) => {
                 if (!winnerId || !loserId) return;
 
                 const pairKey = getPairKey(winnerId, loserId);
-                const updatedDirectMatchups = {
-                    ...(currentGlobalState?.directMatchups || {}),
-                    [pairKey]: {
-                        winnerId,
-                        loserId,
-                        reason: 'direct',
-                        playedAt: Date.now()
-                    }
+                const directRecord = {
+                    winnerId,
+                    loserId,
+                    reason: 'direct',
+                    playedAt: Date.now()
                 };
-
+                const updatedDirectMatchups = {
+                    ...(arenaGlobalState?.[globalKey]?.directMatchups || {}),
+                    [pairKey]: directRecord
+                };
                 const derivedState = buildArenaDerivedState(updatedDirectMatchups, getArenaOrderedProfileIds(perfiles));
                 const updatedMatchups = derivedState.matchups;
                 const updatedStats = derivedState.stats || {};
@@ -4346,19 +4551,11 @@ const saveProfile = (e) => {
                     ? [winnerId, winnerNextOpponentId]
                     : findNextPendingPairByGroups(groupedIds, state.matchups || {}, updatedMatchups);
                 const activeGroup = getGroupForPair(groupedIds, nextPair?.[0], nextPair?.[1]);
-                const nextGlobalState = {
-                    arenaName: globalKey,
-                    orderedIds: getArenaOrderedProfileIds(perfiles),
-                    directMatchups: derivedState.directMatchups,
-                    matchups: updatedMatchups,
-                    victoryGraph: derivedState.victoryGraph,
-                    stats: updatedStats
-                };
 
                 const nextArenaState = {
                     ...state,
                     groupedIds,
-                    directMatchups: nextGlobalState.directMatchups,
+                    directMatchups: derivedState.directMatchups,
                     stats: updatedStats,
                     matchups: updatedMatchups,
                     victoryGraph: derivedState.victoryGraph,
@@ -4368,37 +4565,24 @@ const saveProfile = (e) => {
                     activeGroupLabel: activeGroup ? `${activeGroup.typeLabel}: ${activeGroup.label}` : '',
                     isFinished: !nextPair
                 };
-                const nextArenaBattleState = {
-                    ...(arenaBattleState || {}),
-                    [arenaKey]: nextArenaState
-                };
-                const globalScoreMap = buildArenaScoreMapFromGlobalStats(arenaName, nextArenaBattleState);
-
-                setPerfiles(prev => prev.map(profile => {
-                    if (!profile?.firebaseId || !Object.prototype.hasOwnProperty.call(globalScoreMap, profile.firebaseId)) return profile;
-                    const nextScore = globalScoreMap[profile.firebaseId];
-                    return {
-                        ...profile,
-                        puntuaciones: { ...(profile.puntuaciones || {}), [arenaName]: nextScore }
-                    };
-                }));
-
-                Object.entries(globalScoreMap).forEach(([profileId, nextScore]) => {
-                    updateProfileArenaScore(profileId, arenaName, nextScore);
-                });
 
                 setArenaBattleState(prev => ({
                     ...prev,
                     [arenaKey]: nextArenaState
                 }));
-                setArenaGlobalState(prev => ({
-                    ...prev,
-                    [globalKey]: nextGlobalState
-                }));
 
                 Promise.all([
-                    db.ref(`arenaGlobalState/${globalKey}`).set(nextGlobalState),
-                    db.ref(`arenaBattleState/${arenaKey}`).set(nextArenaState)
+                    db.ref(`arenaGlobalState/${globalKey}/directMatchups/${pairKey}`).transaction((currentRecord) => {
+                        const normalizedCurrent = normalizeMatchupRecord(currentRecord);
+                        if (normalizedCurrent?.reason === 'direct') return currentRecord;
+                        return directRecord;
+                    }),
+                    db.ref(`arenaBattleState/${arenaKey}`).transaction((currentState) => {
+                        if (JSON.stringify(currentState || {}) !== JSON.stringify(state || {})) {
+                            return currentState;
+                        }
+                        return { ...(currentState || {}), ...nextArenaState };
+                    })
                 ])
                     .catch(error => console.error('No se pudo guardar avance de batallas:', error));
             };
@@ -4551,15 +4735,23 @@ const saveProfile = (e) => {
                     }));
 
                     await Promise.all([
-                        db.ref(`arenaGlobalState/${globalKey}`).set(nextGlobalState),
-                        db.ref(`arenaBattleState/${arenaKey}`).set(normalizedState)
+                        db.ref(`arenaGlobalState/${globalKey}/directMatchups/${pairKey}`).remove(),
+                        db.ref(`arenaGlobalState/${globalKey}`).update({
+                            arenaName: nextGlobalState.arenaName,
+                            orderedIds: nextGlobalState.orderedIds,
+                            matchups: nextGlobalState.matchups,
+                            victoryGraph: nextGlobalState.victoryGraph,
+                            stats: nextGlobalState.stats
+                        }),
+                        db.ref(`arenaBattleState/${arenaKey}`).transaction((currentState) => {
+                            if (JSON.stringify(currentState || {}) !== JSON.stringify(arenaState || {})) {
+                                return currentState;
+                            }
+                            return { ...(currentState || {}), ...normalizedState };
+                        })
                     ]);
 
-                    const nextArenaBattleState = {
-                        ...(arenaBattleState || {}),
-                        [arenaKey]: normalizedState
-                    };
-                    const globalScoreMap = buildArenaScoreMapFromGlobalStats(arenaName, nextArenaBattleState);
+                    const globalScoreMap = buildArenaScoreMapFromGlobalStats(arenaName, nextGlobalState);
                     await Promise.all(Object.entries(globalScoreMap).map(async ([profileId, nextScore]) => {
                         await db.ref(`perfiles/${profileId}/puntuaciones/${arenaName}`).set(nextScore);
                     }));
@@ -4935,7 +5127,22 @@ const saveProfile = (e) => {
                                                 <button
                                                     type="button"
                                                     onClick={() => {
-                                                        renderProfileGalleryWindow(selectedTallerProfile);
+                                                        const existingWindow = galleryWindowRef.current;
+                                                        const nuevaVentana = existingWindow && !existingWindow.closed ? existingWindow : window.open('', '_blank');
+                                                        galleryWindowRef.current = nuevaVentana;
+                                                        renderGalleryWindow({
+                                                            targetWindow: nuevaVentana,
+                                                            profileName: selectedTallerProfile?.nombre || '',
+                                                            profession: selectedTallerProfile?.profesion || '',
+                                                            photos: [
+                                                                ...getProfileGalleryEntries(selectedTallerProfile, 'fotos', 'image'),
+                                                                ...getProfileGalleryEntries(selectedTallerProfile, 'videos', 'video')
+                                                            ],
+                                                            editingId: selectedTallerProfile?.firebaseId || selectedTallerProfile?.id || '',
+                                                            battlePhotoPrefs: selectedTallerProfile?.batallaFotosPreferidas || selectedTallerProfile?.galeria?.battlePhotoPreferences || {},
+                                                            profilePhotoUrl: selectedTallerProfile?.fotos?.[0] || ''
+                                                        });
+                                                        nuevaVentana?.focus();
                                                     }}
                                                     className="btn-metal py-3 rounded-xl text-[11px] font-black tracking-wide uppercase"
                                                 >
@@ -5306,14 +5513,18 @@ const saveProfile = (e) => {
                                             />
                                             <button
                                                 type="button"
+                                                disabled={anonMediaUploadProgress !== null}
                                                 onClick={async () => {
                                                     const forcedTag = anonUploadType === 'escena' ? 'videos' : 'fotos';
                                                     await handleAnonMediaSubmit(forcedTag);
                                                 }}
-                                                className="md:col-span-2 px-5 py-3 rounded-xl font-black uppercase tracking-[0.14em] text-cyan-100 border border-cyan-300/50 bg-cyan-500/20 hover:bg-cyan-500/35 transition-all"
+                                                className="md:col-span-2 px-5 py-3 rounded-xl font-black uppercase tracking-[0.14em] text-cyan-100 border border-cyan-300/50 bg-cyan-500/20 hover:bg-cyan-500/35 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
                                             >
-                                                Guardar {anonUploadType}
+                                                {anonMediaUploadProgress !== null ? `Subiendo ${anonMediaUploadProgress}%` : `Guardar ${anonUploadType}`}
                                             </button>
+                                            {anonMediaUploadProgress !== null && (
+                                                <p className="md:col-span-2 text-xs font-black uppercase tracking-[0.12em] text-cyan-200">Subiendo archivo a Storage antes de guardar la referencia...</p>
+                                            )}
                                             {anonMediaError && (
                                                 <p className="md:col-span-2 text-xs font-black uppercase tracking-[0.12em] text-rose-300">{anonMediaError}</p>
                                             )}
@@ -5354,11 +5565,13 @@ const saveProfile = (e) => {
                                         )}
                                         <button
                                             type="button"
+                                            disabled={galleryAudioUploadProgress !== null}
                                             onClick={addGalleryAudioTrack}
-                                            className="px-5 py-3 rounded-xl font-black uppercase tracking-[0.14em] text-cyan-100 border border-cyan-300/50 bg-cyan-500/20 hover:bg-cyan-500/35 transition-all"
+                                            className="px-5 py-3 rounded-xl font-black uppercase tracking-[0.14em] text-cyan-100 border border-cyan-300/50 bg-cyan-500/20 hover:bg-cyan-500/35 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
                                         >
-                                            Guardar audio en Firebase
+                                            {galleryAudioUploadProgress !== null ? `Subiendo audio ${galleryAudioUploadProgress}%` : 'Guardar audio en Firebase'}
                                         </button>
+                                        {galleryAudioUploadProgress !== null ? <p className="text-xs font-black uppercase tracking-[0.12em] text-cyan-200">Subiendo audio a Storage antes de guardar la referencia...</p> : null}
                                         {galleryAudioError ? <p className="text-xs font-black uppercase tracking-[0.12em] text-rose-300">{galleryAudioError}</p> : null}
                                         </div>
                                     )}
@@ -7205,6 +7418,9 @@ const saveProfile = (e) => {
                         onChange={handleLocalProfilePhotoUpload}
                         className="w-full theme-surface-soft border border-dashed theme-border-secondary p-4 rounded-xl outline-none text-slate-200 font-semibold text-xs file:mr-3 file:rounded-lg file:border-0 file:bg-cyan-500/20 file:px-3 file:py-2 file:text-cyan-200 file:font-black"
                     />
+                    {profilePhotoUploadStatus ? (
+                        <p className={`text-[10px] font-black uppercase tracking-[0.14em] ${profilePhotoUploadStatus.includes('No se pudo') ? 'text-rose-300' : 'text-cyan-200'}`}>{profilePhotoUploadStatus}</p>
+                    ) : null}
                 </div>
 
                 <div className="space-y-1">
