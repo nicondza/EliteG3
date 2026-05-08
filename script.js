@@ -1587,6 +1587,7 @@
                     const modalPlayFullscreenButton = document.getElementById('modalPlayFullscreenButton');
                     const VALID_FILE_MIME_PREFIXES = ['image/', 'video/'];
                     const VALID_FILE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4', 'webm', 'ogg', 'mov', 'm4v'];
+                    const MAX_LOCAL_MEDIA_BYTES = 9 * 1024 * 1024;
                     const VIEWER_IMAGE_TIMEOUT_MS = 7000;
                     const VIEWER_VIDEO_FALLBACK_TIMEOUT_MS = 30000;
                     const VIEWER_RETRY_DELAY_MS = 900;
@@ -2221,6 +2222,7 @@
             const galleryWindowRef = useRef(null);
             const contextMenuRef = useRef(null);
             const [perfiles, setPerfiles] = useState([]);
+            const openGalleryProfileIdRef = useRef('');
                 const neonColors = {
         "CANTANTE": { color: "#0ea5e9", sombra: "rgba(14,165,233,0.8)" },    // Celeste
         "NSFW":  { color: "#ef4444", sombra: "rgba(239,68,68,0.8)" },      // Rojo
@@ -2424,12 +2426,14 @@ const getInitialCatFormData = () => ({
                 setEditingId(contextProfile.firebaseId || contextProfile.id || null);
                 setIsModalOpen(true);
             };
-            const openProfileGalleryFromTooltip = (profile = {}) => {
-                const key = profile?.firebaseId || profile?.nombre;
-                if (!key) return;
+            const renderProfileGalleryWindow = (profile = {}) => {
+                const profileId = profile?.firebaseId || profile?.id || '';
                 const existingWindow = galleryWindowRef.current;
                 const nuevaVentana = existingWindow && !existingWindow.closed ? existingWindow : window.open('', '_blank');
+                if (!nuevaVentana) return null;
+
                 galleryWindowRef.current = nuevaVentana;
+                openGalleryProfileIdRef.current = profileId;
                 renderGalleryWindow({
                     targetWindow: nuevaVentana,
                     profileName: profile?.nombre || '',
@@ -2438,11 +2442,17 @@ const getInitialCatFormData = () => ({
                         ...getProfileGalleryEntries(profile, 'fotos', 'image'),
                         ...getProfileGalleryEntries(profile, 'videos', 'video')
                     ],
-                    editingId: profile?.firebaseId || profile?.id || '',
+                    editingId: profileId,
                     battlePhotoPrefs: profile?.batallaFotosPreferidas || profile?.galeria?.battlePhotoPreferences || {},
                     profilePhotoUrl: profile?.fotos?.[0] || ''
                 });
-                nuevaVentana?.focus();
+                nuevaVentana.focus();
+                return nuevaVentana;
+            };
+            const openProfileGalleryFromTooltip = (profile = {}) => {
+                const key = profile?.firebaseId || profile?.nombre;
+                if (!key) return;
+                renderProfileGalleryWindow(profile);
                 setSelectedTallerProfileId('');
                 setTallerMissingPhotosTooltipProfileId('');
             };
@@ -2801,6 +2811,17 @@ const getInitialCatFormData = () => ({
                     });
                 }
             }, [editingId, formData.nombre, formData.profesion, formData.galeria?.fotos, formData.galeria?.videos, formData.batallaFotosPreferidas]);
+
+            useEffect(() => {
+                const targetWindow = galleryWindowRef.current;
+                const openProfileId = openGalleryProfileIdRef.current;
+                if (!targetWindow || targetWindow.closed || !openProfileId || editingId === openProfileId) return;
+
+                const refreshedProfile = (perfiles || []).find((profile) => (profile?.firebaseId || profile?.id || '') === openProfileId);
+                if (refreshedProfile) {
+                    renderProfileGalleryWindow(refreshedProfile);
+                }
+            }, [perfiles, editingId]);
 
             useEffect(() => {
                 const handleMessage = async (event) => {

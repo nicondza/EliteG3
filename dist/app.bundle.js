@@ -2,11 +2,11 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                     <button
                         type="button"
                         class="surface-panel rounded-xl overflow-hidden border border-cyan-200/20 text-left multimedia-thumb-btn"
-                        data-url="${A.url}"
-                        data-label="${A.label||""}"
-                        data-index="${A.sourceIndex}"
-                        data-tag="${A.sourceTag}"
-                        data-media-type="${A.type||"image"}"
+                        data-url="${V.url}"
+                        data-label="${V.label||""}"
+                        data-index="${V.sourceIndex}"
+                        data-tag="${V.sourceTag}"
+                        data-media-type="${V.type||"image"}"
                         draggable="true"
                         title="Editar URL o etiqueta"
                     >
@@ -19,11 +19,11 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                     <button
                         type="button"
                         class="surface-panel rounded-xl overflow-hidden border border-rose-300/35 text-left multimedia-thumb-btn multimedia-thumb-btn--broken"
-                        data-url="${A.url}"
-                        data-label="${A.label||""}"
-                        data-index="${A.sourceIndex}"
-                        data-tag="${A.sourceTag}"
-                        data-media-type="${A.type||"image"}"
+                        data-url="${V.url}"
+                        data-label="${V.label||""}"
+                        data-index="${V.sourceIndex}"
+                        data-tag="${V.sourceTag}"
+                        data-media-type="${V.type||"image"}"
                         draggable="true"
                         data-broken-card="true"
                         style="display:none;"
@@ -37,11 +37,11 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                 `).join(""):'<p class="text-slate-300">Sin imágenes en galería.</p>',R=lJ.map((A)=>{const K=A.id==="perfil",S=K?d:b[A.id]||"",N=S?K?{url:S}:XJ[S]||{url:S,label:"",sourceIndex:-1}:null,WJ=Boolean(S);return`
                     <div class="multimedia-slot-card ${WJ?"is-assigned":"is-missing"}" data-slot-id="${A.id}">
                         <div class="multimedia-slot-top">
-                            <span class="multimedia-slot-title">${A.label}</span>
-                            <span class="multimedia-slot-state">${WJ?"VERDE":"ROJO"}</span>
+                            <span class="multimedia-slot-title">${V.label}</span>
+                            <span class="multimedia-slot-state">${S?"VERDE":"ROJO"}</span>
                         </div>
                         <div class="multimedia-slot-preview">
-                            ${WJ?`<img src="${N.url}" alt="${A.label}" loading="lazy" />`:'<span class="multimedia-slot-empty">Sin foto designada</span>'}
+                            ${S?`<img src="${s.url}" alt="${V.label}" loading="lazy" />`:'<span class="multimedia-slot-empty">Sin foto designada</span>'}
                         </div>
                         <div class="multimedia-slot-actions">
                             ${!K?`<button type="button" class="multimedia-slot-assign-btn" data-slot-assign="${A.id}">DESIGNAR FOTO</button>`:""}
@@ -119,19 +119,19 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                                 </article>
                                 <article class="surface-panel rounded-2xl border border-cyan-200/20 mt-4 p-4">
                                     <h2 class="font-black uppercase tracking-wide mb-3">5 principales</h2>
-                                    <div class="multimedia-slots-grid">${R}</div>
+                                    <div class="multimedia-slots-grid">${A}</div>
                                 </article>
                                 <article class="surface-panel rounded-2xl border border-rose-300/25 mt-4 p-4">
                                     <h2 class="font-black uppercase tracking-wide mb-2">Imágenes rotas</h2>
                                     <p class="text-xs text-rose-100/80 uppercase tracking-[0.12em] mb-3">Solo fotos que ya no cargan. Tocá una para corregir URL y etiqueta.</p>
-                                    <div id="brokenGalleryGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">${P}</div>
+                                    <div id="brokenGalleryGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">${k}</div>
                                     <p id="brokenGalleryEmpty" class="text-sm text-slate-300">No hay imágenes rotas detectadas.</p>
                                 </article>
                             </section>
                         </main>
                         <script>
-                            const profileId = ${JSON.stringify(C)};
-                            const validLabels = ${JSON.stringify(QJ)};
+                            const profileId = ${JSON.stringify(R)};
+                            const validLabels = ${JSON.stringify(XJ)};
                             const dbRef = window.opener && window.opener.firebase && window.opener.firebase.database ? window.opener.firebase.database() : null;
                             const normalizeLabel = (rawLabel = '') => validLabels.includes(rawLabel) ? rawLabel : '';
                             const brokenCards = new Set();
@@ -144,7 +144,7 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                                 if (!window.opener || !slotId || !isImagePayload(payload)) return false;
                                 const sourceIndex = Number(payload.sourceIndex);
                                 if (!Number.isInteger(sourceIndex) || sourceIndex < 0) return false;
-                                window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF', id: '${C}', slotId, index: sourceIndex, mediaType: 'image' }, '*');
+                                window.opener.postMessage({ type: 'SET_BATTLE_PHOTO_PREF', id: '${R}', slotId, index: sourceIndex, mediaType: 'image' }, '*');
                                 return true;
                             };
                             const syncBrokenEmptyState = () => {
@@ -699,7 +699,7 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                         <option value="video">Video</option>
                     </select>
                     <select id="nuevaFotoEtiqueta" style="width: 100%; padding: 12px; margin-top: 15px; background: #020617; border: 1px solid rgba(71,85,105,0.92); color: #e2e8f0; border-radius: 8px; outline: none; box-shadow: inset 0 1px 0 rgba(148,163,184,0.18);">
-                        ${QJ.map((R)=>`<option value="${R}">Etiqueta ${R}</option>`).join("")}
+                        ${XJ.map((A)=>`<option value="${A}">Etiqueta ${A}</option>`).join("")}
                     </select>
                     <input type="text" id="nuevaFotoAutor" placeholder="Autor (opcional)" style="width: 100%; padding: 12px; margin-top: 15px; background: #020617; border: 1px solid rgba(71,85,105,0.92); color: #e2e8f0; border-radius: 8px; outline: none; box-shadow: inset 0 1px 0 rgba(148,163,184,0.18);">
                     <input type="hidden" id="slotSelectionId" value="">
@@ -722,9 +722,9 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                     ${lJ.map((R)=>{const A=R.id==="perfil",K=A?p:XJ[R.id]||"",S=Boolean(K),N=!A;return`
                             <div class="gallery-slot-card" data-slot-id="${R.id}" style="border:1px solid ${S?"rgba(74,222,128,0.95)":"rgba(248,113,113,0.95)"}; border-radius:10px; padding:10px; background:${S?"linear-gradient(155deg, rgba(20,83,45,0.95) 0%, rgba(21,128,61,0.82) 45%, rgba(5,46,22,0.96) 100%)":"linear-gradient(155deg, rgba(127,29,29,0.96) 0%, rgba(185,28,28,0.84) 45%, rgba(69,10,10,0.96) 100%)"}; box-shadow: inset 0 2px 0 rgba(255,255,255,0.24), inset 0 -2px 0 rgba(2,6,23,0.45), inset 0 0 0 1px ${S?"rgba(187,247,208,0.25)":"rgba(254,202,202,0.22)"}, 0 8px 16px rgba(2,6,23,0.45), 0 0 18px ${S?"rgba(74,222,128,0.35)":"rgba(248,113,113,0.3)"}; position: relative;">
                                 <div style="position:absolute; inset:1px; border-radius:9px; pointer-events:none; background: linear-gradient(145deg, rgba(255,255,255,0.24) 0%, rgba(255,255,255,0.05) 22%, rgba(255,255,255,0) 42%, rgba(2,6,23,0.22) 78%, rgba(2,6,23,0.42) 100%);"></div>
-                                <div style="font-size:10px; color:#f8fafc; font-weight:900; letter-spacing:0.12em; text-transform:uppercase; position:relative;">${R.label}</div>
-                                <div style="font-size:11px; color:${S?"#dcfce7":"#fee2e2"}; margin-top:6px; font-weight:800; position:relative; text-shadow: 0 1px 0 rgba(15,23,42,0.65);">
-                                    Estado: ${S?"Asignada":"No asignada"}
+                                <div style="font-size:10px; color:#f8fafc; font-weight:900; letter-spacing:0.12em; text-transform:uppercase; position:relative;">${A.label}</div>
+                                <div style="font-size:11px; color:${N?"#dcfce7":"#fee2e2"}; margin-top:6px; font-weight:800; position:relative; text-shadow: 0 1px 0 rgba(15,23,42,0.65);">
+                                    Estado: ${N?"Asignada":"No asignada"}
                                 </div>
                                 <div style="margin-top:8px; border-radius:8px; overflow:hidden; aspect-ratio:4/3; border:1px dashed rgba(148,163,184,0.45); background: rgba(2,6,23,0.86); display:flex; align-items:center; justify-content:center;">
                                     ${S?`<img src="${K}" alt="Vista previa ${R.label}" onerror="${aX}" style="width:100%; height:100%; object-fit:cover; display:block;" />`:'<span style="font-size:10px; color:#fca5a5; text-transform:uppercase; letter-spacing:0.08em; font-weight:700; text-align:center; padding:0 8px;">Sin foto designada</span>'}
@@ -732,16 +732,16 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                                 <div style="display:grid; gap:6px; margin-top:8px;">
                                     <button
                                         type="button"
-                                        onclick="event.stopPropagation(); openSlotActionModal('${R.id}', 'url');"
+                                        onclick="event.stopPropagation(); openSlotActionModal('${A.id}', 'url');"
                                         style="width:100%; border:1px solid rgba(125,211,252,0.6); background: rgba(2,6,23,0.82); color:#e2e8f0; border-radius:8px; padding:6px 8px; font-size:10px; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; cursor:pointer; box-shadow: 0 0 12px rgba(34,211,238,0.22);"
                                     >
                                         Agregar URL/Archivo
                                     </button>
-                                    ${N?`<button
+                                    ${s?`<button
                                         type="button"
                                         class="slot-gallery-select-btn"
-                                        data-slot-id="${R.id}"
-                                        onclick="event.stopPropagation(); selectSlotFromGallery('${R.id}');"
+                                        data-slot-id="${A.id}"
+                                        onclick="event.stopPropagation(); selectSlotFromGallery('${A.id}');"
                                         style="width:100%; border:1px solid rgba(203,213,225,0.92); background: linear-gradient(165deg, rgba(148,163,184,0.5) 0%, rgba(71,85,105,0.82) 45%, rgba(30,41,59,0.94) 100%); color:#f8fafc; border-radius:8px; padding:6px 8px; font-size:10px; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; cursor:pointer; box-shadow: inset 0 1px 0 rgba(255,255,255,0.42), inset 0 -1px 0 rgba(15,23,42,0.55), 0 6px 12px rgba(2,6,23,0.45); transition: box-shadow 180ms ease, border-color 180ms ease, filter 180ms ease, background 180ms ease;"
                                     >
                                         Designar de galería
@@ -767,15 +767,15 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                                 aspect-ratio: 1/1;
                                 border-radius: 15px;
                                 overflow: hidden;
-                                border: 2px solid ${f.color};
-                                box-shadow: 0 0 15px ${f.sombra};
+                                border: 2px solid ${EJ.color};
+                                box-shadow: 0 0 15px ${EJ.sombra};
                                 transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
                                 cursor: ${aJ(R)==="image"?"grab":"pointer"};
                                 position: relative;
                                 background: #0f172a;
                             "
-                            onmouseover="this.style.transform='scale(1.08)'; this.style.boxShadow='0 0 35px ${f.color}, inset 0 0 15px ${f.sombra}'; this.style.zIndex='10';"
-                            onmouseout="this.style.transform='scale(1)'; this.style.boxShadow='0 0 15px ${f.sombra}'; this.style.zIndex='1';"
+                            onmouseover="this.style.transform='scale(1.08)'; this.style.boxShadow='0 0 35px ${EJ.color}, inset 0 0 15px ${EJ.sombra}'; this.style.zIndex='10';"
+                            onmouseout="this.style.transform='scale(1)'; this.style.boxShadow='0 0 15px ${EJ.sombra}'; this.style.zIndex='1';"
                         >
                            <button
                             onclick="event.stopPropagation(); window.opener.postMessage({type: 'DELETE_IMAGE', index: ${R.sourceIndex}, mediaType: '${aJ(R)}', id: '${F}'}, '*');"
@@ -836,6 +836,7 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                     const modalPlayFullscreenButton = document.getElementById('modalPlayFullscreenButton');
                     const VALID_FILE_MIME_PREFIXES = ['image/', 'video/'];
                     const VALID_FILE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4', 'webm', 'ogg', 'mov', 'm4v'];
+                    const MAX_LOCAL_MEDIA_BYTES = 9 * 1024 * 1024;
                     const VIEWER_IMAGE_TIMEOUT_MS = 7000;
                     const VIEWER_VIDEO_FALLBACK_TIMEOUT_MS = 30000;
                     const VIEWER_RETRY_DELAY_MS = 900;
@@ -957,7 +958,7 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                         const slotInput = document.getElementById('slotSelectionId');
                         if (urlInput) urlInput.value = '';
                         if (localInput) localInput.value = '';
-                        if (labelInput) labelInput.value = '${QJ[0]}';
+                        if (labelInput) labelInput.value = '${XJ[0]}';
                         if (authorInput) authorInput.value = '';
                         if (mediaTypeInput) mediaTypeInput.value = 'image';
                         if (slotInput) slotInput.value = '';
@@ -976,7 +977,7 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                         const normalizedUrl = (urlInput?.value || '').trim();
                         const selectedFiles = Array.from(localInput?.files || []);
                         const mediaType = mediaTypeInput?.value || 'image';
-                        const label = labelInput?.value || '${QJ[0]}';
+                        const label = labelInput?.value || '${XJ[0]}';
                         const autor = (authorInput?.value || '').trim();
                         const slotSelectionId = activeSlotSelectionId || document.getElementById('slotSelectionId')?.value || '';
 
@@ -992,6 +993,11 @@ import{jsxDEV as Q,Fragment as GJ}from"react/jsx-dev-runtime";const d0={apiKey:"
                             const invalidFile = selectedFiles.find((file) => !isAllowedFileType(file));
                             if (invalidFile) {
                                 alert('Uno o más archivos no son válidos. Usá imagen o video.');
+                                return;
+                            }
+                            const oversizedFile = selectedFiles.find((file) => Number(file?.size || 0) > MAX_LOCAL_MEDIA_BYTES);
+                            if (oversizedFile) {
+                                alert('El archivo "' + (oversizedFile.name || 'seleccionado') + '" pesa más de 9 MB. Comprimilo o usá una URL para que Firebase pueda guardarlo correctamente.');
                                 return;
                             }
                             const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
