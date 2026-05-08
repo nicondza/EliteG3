@@ -15,6 +15,7 @@
             firebase.initializeApp(firebaseConfig);
         }
         const db = firebase.database();
+        const storage = firebase.storage();
         const { useState, useEffect, useMemo, useRef } = React;
 
         const GALLERY_LABELS = ['C', 'P', 'B', 'N', 'S', 'E', 'X', 'R'];
@@ -1744,17 +1745,42 @@
                                 alert('Uno o más archivos no son válidos. Usá imagen o video.');
                                 return;
                             }
-                            const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
-                                const reader = new FileReader();
-                                reader.onload = () => resolve({
-                                    url: String(reader.result || ''),
-                                    type: file.type && file.type.startsWith('video/') ? 'video' : 'image'
-                                });
-                                reader.onerror = () => reject(new Error('No se pudo leer uno de los archivos seleccionados.'));
-                                reader.readAsDataURL(file);
+                            const sanitizePathSegment = (value) => String(value || '')
+                                .trim()
+                                .normalize('NFD')
+                                .replace(/[\u0300-\u036f]/g, '')
+                                .replace(/[^a-zA-Z0-9._-]+/g, '-')
+                                .replace(/^-+|-+$/g, '')
+                                .slice(0, 80) || 'archivo';
+                            const uploadFile = (file) => new Promise((resolve, reject) => {
+                                const openerStorage = window.opener?.firebase?.storage ? window.opener.firebase.storage() : null;
+                                if (!openerStorage) {
+                                    reject(new Error('Firebase Storage no está disponible para subir el archivo.'));
+                                    return;
+                                }
+                                const extensionParts = String(file.name || '').split('.');
+                                const extension = extensionParts.length > 1 ? extensionParts.pop().toLowerCase() : (String(file.type || '').split('/').pop() || 'bin');
+                                const baseName = sanitizePathSegment(String(file.name || 'archivo').replace(/\.[^.]+$/, ''));
+                                const storagePath = 'perfiles/${editingId}/galeria/modal/' + Date.now() + '-' + Math.random().toString(36).slice(2, 10) + '-' + baseName + '.' + extension;
+                                const uploadTask = openerStorage.ref(storagePath).put(file);
+                                uploadTask.on(
+                                    window.opener.firebase.storage.TaskEvent.STATE_CHANGED,
+                                    null,
+                                    reject,
+                                    async () => {
+                                        try {
+                                            resolve({
+                                                url: await uploadTask.snapshot.ref.getDownloadURL(),
+                                                type: file.type && file.type.startsWith('video/') ? 'video' : 'image'
+                                            });
+                                        } catch (error) {
+                                            reject(error);
+                                        }
+                                    }
+                                );
                             });
 
-                            Promise.all(selectedFiles.map(readFileAsDataUrl))
+                            Promise.all(selectedFiles.map(uploadFile))
                                 .then((filesData) => {
                                     filesData.forEach((fileData, index) => {
                                         postMedia(fileData.url, fileData.type, index === 0);
@@ -1763,7 +1789,7 @@
                                     resetAddMediaModalFields();
                                 })
                                 .catch((error) => {
-                                    alert(error.message || 'No se pudo leer el archivo seleccionado.');
+                                    alert(error.message || 'No se pudo subir el archivo seleccionado. No se guardó la referencia.');
                                 });
                             return;
                         }
@@ -2268,6 +2294,7 @@
             const [anonMediaLabel, setAnonMediaLabel] = useState(GALLERY_LABELS[0]);
             const [anonMediaAuthor, setAnonMediaAuthor] = useState('');
             const [anonMediaError, setAnonMediaError] = useState('');
+            const [anonMediaUploadProgress, setAnonMediaUploadProgress] = useState(null);
             const [anonUploadType, setAnonUploadType] = useState('');
             const [galleryAudioTracks, setGalleryAudioTracks] = useState([]);
             const [galleryAudioName, setGalleryAudioName] = useState('');
@@ -2275,6 +2302,8 @@
             const [galleryAudioUrl, setGalleryAudioUrl] = useState('');
             const [galleryAudioFile, setGalleryAudioFile] = useState(null);
             const [galleryAudioError, setGalleryAudioError] = useState('');
+            const [galleryAudioUploadProgress, setGalleryAudioUploadProgress] = useState(null);
+            const [profilePhotoUploadStatus, setProfilePhotoUploadStatus] = useState('');
             const [isGalleryMusicEnabled, setIsGalleryMusicEnabled] = useState(false);
             const [selectedGalleryAudioA, setSelectedGalleryAudioA] = useState('');
             const [selectedGalleryAudioB, setSelectedGalleryAudioB] = useState('');
@@ -2603,12 +2632,6 @@ const getInitialCatFormData = () => ({
                     }));
                 }
             };
-            const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => resolve(String(reader.result || ''));
-                reader.onerror = () => reject(new Error('No se pudo leer el archivo.'));
-                reader.readAsDataURL(file);
-            });
             const withProfilePhotoSyncedToGallery = (prevState, profilePhotoUrlRaw) => {
                 const normalizedProfileUrl = String(profilePhotoUrlRaw || '').trim();
                 const currentGallery = Array.isArray(prevState?.galeria?.fotos) ? prevState.galeria.fotos : [];
@@ -2618,7 +2641,7 @@ const getInitialCatFormData = () => ({
                 const alreadyExists = currentGallery.some((item) => normalizeGalleryItem(item, 'image').url === normalizedProfileUrl);
                 const nextGallery = alreadyExists
                     ? currentGallery
-                    : [...currentGallery, { url: normalizedProfileUrl, label: 'C', type: 'image' }];
+                    : [...currentGallery, { url: normalizedProfileUrl, label: 'C', type: 'image', autor: '' }];
                 return {
                     ...prevState,
                     fotos: [normalizedProfileUrl],
@@ -2628,14 +2651,28 @@ const getInitialCatFormData = () => ({
                     }
                 };
             };
+            const ensureProfileStorageId = () => {
+                if (editingId) return editingId;
+                const reservedProfileId = db.ref('perfiles').push().key;
+                setEditingId(reservedProfileId);
+                return reservedProfileId;
+            };
             const handleLocalProfilePhotoUpload = async (event) => {
                 const selectedFile = event.target.files?.[0];
                 if (!selectedFile) return;
+                const profileId = ensureProfileStorageId();
+                setProfilePhotoUploadStatus('Subiendo foto de perfil: 0%');
                 try {
-                    const dataUrl = await readFileAsDataUrl(selectedFile);
-                    setFormData(prev => withProfilePhotoSyncedToGallery(prev, dataUrl));
+                    const downloadURL = await uploadFileToStorage(
+                        selectedFile,
+                        `perfiles/${profileId}/galeria/perfil`,
+                        (progress) => setProfilePhotoUploadStatus(`Subiendo foto de perfil: ${progress}%`)
+                    );
+                    setFormData(prev => withProfilePhotoSyncedToGallery(prev, downloadURL));
+                    setProfilePhotoUploadStatus('Foto de perfil subida correctamente.');
                 } catch (error) {
-                    console.error('Error al cargar foto de perfil local:', error);
+                    console.error('Error al subir foto de perfil local:', error);
+                    setProfilePhotoUploadStatus(error?.message || 'No se pudo subir la foto de perfil. No se guardó la referencia.');
                 } finally {
                     event.target.value = '';
                 }
@@ -2662,24 +2699,33 @@ const getInitialCatFormData = () => ({
             };
             const handleAnonMediaSubmit = async (forcedTag = '') => {
                 setAnonMediaError('');
+                setAnonMediaUploadProgress(null);
                 try {
                     let finalUrl = String(anonMediaUrl || '').trim();
                     if (anonMediaSource === 'file') {
                         if (!anonMediaFile) throw new Error('Seleccioná un archivo local.');
-                        finalUrl = await readFileAsDataUrl(anonMediaFile);
+                        const storageTag = forcedTag || (anonMediaFile.type?.startsWith('video/') ? 'videos' : 'fotos');
+                        finalUrl = await uploadFileToStorage(
+                            anonMediaFile,
+                            `${ANON_GALLERY_NODE_PATH}/${storageTag}`,
+                            (progress) => setAnonMediaUploadProgress(progress)
+                        );
                     }
                     await addAnonymousGalleryItem({ url: finalUrl, label: anonMediaLabel, autor: anonMediaAuthor, forcedTag });
                     setAnonMediaUrl('');
                     setAnonMediaFile(null);
                     setAnonMediaAuthor('');
                     setAnonMediaSource('url');
+                    setAnonMediaUploadProgress(null);
                 } catch (error) {
+                    setAnonMediaUploadProgress(null);
                     setAnonMediaError(error?.message || 'No se pudo guardar en galería anónima.');
                 }
             };
             const addGalleryAudioTrack = async () => {
                 const normalizedName = String(galleryAudioName || '').trim();
                 setGalleryAudioError('');
+                setGalleryAudioUploadProgress(null);
                 if (!normalizedName) {
                     setGalleryAudioError('Completá el nombre del audio.');
                     return;
@@ -2691,7 +2737,11 @@ const getInitialCatFormData = () => ({
                             setGalleryAudioError('Seleccioná un archivo de audio.');
                             return;
                         }
-                        normalizedUrl = await readFileAsDataUrl(galleryAudioFile);
+                        normalizedUrl = await uploadFileToStorage(
+                            galleryAudioFile,
+                            'anonimo/audios',
+                            (progress) => setGalleryAudioUploadProgress(progress)
+                        );
                     } else if (!normalizedUrl) {
                         setGalleryAudioError('Completá la URL del audio.');
                         return;
@@ -2703,14 +2753,16 @@ const getInitialCatFormData = () => ({
                     const audioRef = db.ref(`${ANON_GALLERY_NODE_PATH}/audios`);
                     const snapshot = await audioRef.once('value');
                     const currentAudios = Array.isArray(snapshot.val()) ? snapshot.val() : [];
-                    const updatedAudios = [...currentAudios, { nombre: normalizedName, url: normalizedUrl }];
+                    const updatedAudios = [...currentAudios, { url: normalizedUrl, label: normalizedName, type: 'audio', autor: '' }];
                     await audioRef.set(updatedAudios);
                     setGalleryAudioName('');
                     setGalleryAudioUrl('');
                     setGalleryAudioFile(null);
                     setGalleryAudioSource('url');
+                    setGalleryAudioUploadProgress(null);
                 } catch (error) {
-                    setGalleryAudioError('No se pudo guardar el audio en Firebase.');
+                    setGalleryAudioUploadProgress(null);
+                    setGalleryAudioError(error?.message || 'No se pudo guardar el audio en Firebase.');
                 }
             };
             const handleDelete = async (id, e) => {
@@ -2920,7 +2972,7 @@ const getInitialCatFormData = () => ({
                     const audios = Array.isArray(anonGalleryData?.audios)
                         ? anonGalleryData.audios
                             .map((audio) => ({
-                                nombre: String(audio?.nombre || '').trim(),
+                                nombre: String(audio?.label || audio?.nombre || '').trim(),
                                 url: String(audio?.url || '').trim()
                             }))
                             .filter((audio) => audio.nombre && audio.url)
@@ -5440,14 +5492,18 @@ const getInitialCatFormData = () => ({
                                             />
                                             <button
                                                 type="button"
+                                                disabled={anonMediaUploadProgress !== null}
                                                 onClick={async () => {
                                                     const forcedTag = anonUploadType === 'escena' ? 'videos' : 'fotos';
                                                     await handleAnonMediaSubmit(forcedTag);
                                                 }}
-                                                className="md:col-span-2 px-5 py-3 rounded-xl font-black uppercase tracking-[0.14em] text-cyan-100 border border-cyan-300/50 bg-cyan-500/20 hover:bg-cyan-500/35 transition-all"
+                                                className="md:col-span-2 px-5 py-3 rounded-xl font-black uppercase tracking-[0.14em] text-cyan-100 border border-cyan-300/50 bg-cyan-500/20 hover:bg-cyan-500/35 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
                                             >
-                                                Guardar {anonUploadType}
+                                                {anonMediaUploadProgress !== null ? `Subiendo ${anonMediaUploadProgress}%` : `Guardar ${anonUploadType}`}
                                             </button>
+                                            {anonMediaUploadProgress !== null && (
+                                                <p className="md:col-span-2 text-xs font-black uppercase tracking-[0.12em] text-cyan-200">Subiendo archivo a Storage antes de guardar la referencia...</p>
+                                            )}
                                             {anonMediaError && (
                                                 <p className="md:col-span-2 text-xs font-black uppercase tracking-[0.12em] text-rose-300">{anonMediaError}</p>
                                             )}
@@ -5488,11 +5544,13 @@ const getInitialCatFormData = () => ({
                                         )}
                                         <button
                                             type="button"
+                                            disabled={galleryAudioUploadProgress !== null}
                                             onClick={addGalleryAudioTrack}
-                                            className="px-5 py-3 rounded-xl font-black uppercase tracking-[0.14em] text-cyan-100 border border-cyan-300/50 bg-cyan-500/20 hover:bg-cyan-500/35 transition-all"
+                                            className="px-5 py-3 rounded-xl font-black uppercase tracking-[0.14em] text-cyan-100 border border-cyan-300/50 bg-cyan-500/20 hover:bg-cyan-500/35 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
                                         >
-                                            Guardar audio en Firebase
+                                            {galleryAudioUploadProgress !== null ? `Subiendo audio ${galleryAudioUploadProgress}%` : 'Guardar audio en Firebase'}
                                         </button>
+                                        {galleryAudioUploadProgress !== null ? <p className="text-xs font-black uppercase tracking-[0.12em] text-cyan-200">Subiendo audio a Storage antes de guardar la referencia...</p> : null}
                                         {galleryAudioError ? <p className="text-xs font-black uppercase tracking-[0.12em] text-rose-300">{galleryAudioError}</p> : null}
                                         </div>
                                     )}
@@ -7339,6 +7397,9 @@ const getInitialCatFormData = () => ({
                         onChange={handleLocalProfilePhotoUpload}
                         className="w-full theme-surface-soft border border-dashed theme-border-secondary p-4 rounded-xl outline-none text-slate-200 font-semibold text-xs file:mr-3 file:rounded-lg file:border-0 file:bg-cyan-500/20 file:px-3 file:py-2 file:text-cyan-200 file:font-black"
                     />
+                    {profilePhotoUploadStatus ? (
+                        <p className={`text-[10px] font-black uppercase tracking-[0.14em] ${profilePhotoUploadStatus.includes('No se pudo') ? 'text-rose-300' : 'text-cyan-200'}`}>{profilePhotoUploadStatus}</p>
+                    ) : null}
                 </div>
 
                 <div className="space-y-1">
