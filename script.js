@@ -1559,6 +1559,7 @@
                     const modalPlayFullscreenButton = document.getElementById('modalPlayFullscreenButton');
                     const VALID_FILE_MIME_PREFIXES = ['image/', 'video/'];
                     const VALID_FILE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4', 'webm', 'ogg', 'mov', 'm4v'];
+                    const MAX_LOCAL_MEDIA_BYTES = 9 * 1024 * 1024;
                     const VIEWER_IMAGE_TIMEOUT_MS = 7000;
                     const VIEWER_VIDEO_FALLBACK_TIMEOUT_MS = 30000;
                     const VIEWER_RETRY_DELAY_MS = 900;
@@ -1715,6 +1716,11 @@
                             const invalidFile = selectedFiles.find((file) => !isAllowedFileType(file));
                             if (invalidFile) {
                                 alert('Uno o más archivos no son válidos. Usá imagen o video.');
+                                return;
+                            }
+                            const oversizedFile = selectedFiles.find((file) => Number(file?.size || 0) > MAX_LOCAL_MEDIA_BYTES);
+                            if (oversizedFile) {
+                                alert('El archivo "' + (oversizedFile.name || 'seleccionado') + '" pesa más de 9 MB. Comprimilo o usá una URL para que Firebase pueda guardarlo correctamente.');
                                 return;
                             }
                             const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
@@ -2168,6 +2174,7 @@
             const galleryWindowRef = useRef(null);
             const contextMenuRef = useRef(null);
             const [perfiles, setPerfiles] = useState([]);
+            const openGalleryProfileIdRef = useRef('');
                 const neonColors = {
         "CANTANTE": { color: "#0ea5e9", sombra: "rgba(14,165,233,0.8)" },    // Celeste
         "NSFW":  { color: "#ef4444", sombra: "rgba(239,68,68,0.8)" },      // Rojo
@@ -2335,12 +2342,14 @@ const getInitialCatFormData = () => ({
                 setEditingId(contextProfile.firebaseId || contextProfile.id || null);
                 setIsModalOpen(true);
             };
-            const openProfileGalleryFromTooltip = (profile = {}) => {
-                const key = profile?.firebaseId || profile?.nombre;
-                if (!key) return;
+            const renderProfileGalleryWindow = (profile = {}) => {
+                const profileId = profile?.firebaseId || profile?.id || '';
                 const existingWindow = galleryWindowRef.current;
                 const nuevaVentana = existingWindow && !existingWindow.closed ? existingWindow : window.open('', '_blank');
+                if (!nuevaVentana) return null;
+
                 galleryWindowRef.current = nuevaVentana;
+                openGalleryProfileIdRef.current = profileId;
                 renderGalleryWindow({
                     targetWindow: nuevaVentana,
                     profileName: profile?.nombre || '',
@@ -2349,11 +2358,17 @@ const getInitialCatFormData = () => ({
                         ...((profile?.galeria?.fotos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'image'), sourceTag: 'fotos', sourceIndex: index }))),
                         ...((profile?.galeria?.videos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'video'), sourceTag: 'videos', sourceIndex: index })))
                     ],
-                    editingId: profile?.firebaseId || profile?.id || '',
+                    editingId: profileId,
                     battlePhotoPrefs: profile?.batallaFotosPreferidas || profile?.galeria?.battlePhotoPreferences || {},
                     profilePhotoUrl: profile?.fotos?.[0] || ''
                 });
-                nuevaVentana?.focus();
+                nuevaVentana.focus();
+                return nuevaVentana;
+            };
+            const openProfileGalleryFromTooltip = (profile = {}) => {
+                const key = profile?.firebaseId || profile?.nombre;
+                if (!key) return;
+                renderProfileGalleryWindow(profile);
                 setSelectedTallerProfileId('');
                 setTallerMissingPhotosTooltipProfileId('');
             };
@@ -2403,11 +2418,14 @@ const getInitialCatFormData = () => ({
                 if (!profileId || !normalizedUrl) return [];
 
                 const galleryRef = db.ref(`perfiles/${profileId}/galeria/${tag}`);
-                const snapshot = await galleryRef.once('value');
-                const currentItems = snapshot.val() || [];
-                const updatedItems = [...currentItems, { url: normalizedUrl, label: normalizedLabel, type: normalizedType, autor: normalizeGalleryAuthor(autor) }];
-
-                await galleryRef.set(updatedItems);
+                const newItem = { url: normalizedUrl, label: normalizedLabel, type: normalizedType, autor: normalizeGalleryAuthor(autor) };
+                const transactionResult = await galleryRef.transaction((currentItems) => {
+                    const safeItems = Array.isArray(currentItems) ? currentItems : [];
+                    return [...safeItems, newItem];
+                });
+                const updatedItems = Array.isArray(transactionResult?.snapshot?.val())
+                    ? transactionResult.snapshot.val()
+                    : [newItem];
 
                 if (profileId === editingId) {
                     setFormData(prev => ({
@@ -2528,7 +2546,17 @@ const getInitialCatFormData = () => ({
                     }));
                 }
             };
+            const MAX_LOCAL_MEDIA_BYTES = 9 * 1024 * 1024;
+            const isAllowedLocalGalleryFile = (file, allowedPrefixes = ['image/', 'video/']) => {
+                if (!file) return false;
+                const mime = String(file.type || '').toLowerCase();
+                return allowedPrefixes.some((prefix) => mime.startsWith(prefix));
+            };
             const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
+                if (file && Number(file.size || 0) > MAX_LOCAL_MEDIA_BYTES) {
+                    reject(new Error('El archivo pesa más de 9 MB. Comprimilo o usá una URL para guardarlo en la galería.'));
+                    return;
+                }
                 const reader = new FileReader();
                 reader.onload = () => resolve(String(reader.result || ''));
                 reader.onerror = () => reject(new Error('No se pudo leer el archivo.'));
@@ -2578,15 +2606,16 @@ const getInitialCatFormData = () => ({
                 }
                 const tag = forcedTag || (inferredType === 'video' ? 'videos' : 'fotos');
                 const galleryRef = db.ref(`${ANON_GALLERY_NODE_PATH}/${tag}`);
-                const snapshot = await galleryRef.once('value');
-                const currentItems = Array.isArray(snapshot.val()) ? snapshot.val() : [];
-                const updatedItems = [...currentItems, {
+                const newItem = {
                     url: normalizedUrl,
                     label: normalizedLabel,
                     type: inferredType,
                     autor: String(autor || '').trim()
-                }];
-                await galleryRef.set(updatedItems);
+                };
+                await galleryRef.transaction((currentItems) => {
+                    const safeItems = Array.isArray(currentItems) ? currentItems : [];
+                    return [...safeItems, newItem];
+                });
             };
             const handleAnonMediaSubmit = async (forcedTag = '') => {
                 setAnonMediaError('');
@@ -2594,6 +2623,10 @@ const getInitialCatFormData = () => ({
                     let finalUrl = String(anonMediaUrl || '').trim();
                     if (anonMediaSource === 'file') {
                         if (!anonMediaFile) throw new Error('Seleccioná un archivo local.');
+                        const allowedPrefixes = anonUploadType === 'imagen' ? ['image/'] : ['image/', 'video/'];
+                        if (!isAllowedLocalGalleryFile(anonMediaFile, allowedPrefixes)) {
+                            throw new Error('Archivo no válido. Usá imagen o video según la sección elegida.');
+                        }
                         finalUrl = await readFileAsDataUrl(anonMediaFile);
                     }
                     await addAnonymousGalleryItem({ url: finalUrl, label: anonMediaLabel, autor: anonMediaAuthor, forcedTag });
@@ -2679,6 +2712,17 @@ const getInitialCatFormData = () => ({
             }, [editingId, formData.nombre, formData.profesion, formData.galeria?.fotos, formData.galeria?.videos, formData.batallaFotosPreferidas]);
 
             useEffect(() => {
+                const targetWindow = galleryWindowRef.current;
+                const openProfileId = openGalleryProfileIdRef.current;
+                if (!targetWindow || targetWindow.closed || !openProfileId || editingId === openProfileId) return;
+
+                const refreshedProfile = (perfiles || []).find((profile) => (profile?.firebaseId || profile?.id || '') === openProfileId);
+                if (refreshedProfile) {
+                    renderProfileGalleryWindow(refreshedProfile);
+                }
+            }, [perfiles, editingId]);
+
+            useEffect(() => {
                 const handleMessage = async (event) => {
                     if (event.data.type === 'ADD_IMAGE') {
                         const { url, id, label, mediaType, autor } = event.data;
@@ -2687,13 +2731,16 @@ const getInitialCatFormData = () => ({
                         const galleryRef = id === ANON_PROFILE_ID
                             ? db.ref(`${ANON_GALLERY_NODE_PATH}/${tag}`)
                             : db.ref(`perfiles/${id}/galeria/${tag}`);
-                        const snapshot = await galleryRef.once('value');
-                        const currentPhotos = snapshot.val() || [];
                         const normalizedUrl = (url || '').trim();
                         if (!normalizedUrl) return;
-                        const updatedPhotos = [...currentPhotos, { url: normalizedUrl, label: GALLERY_LABELS.includes(label) ? label : '', type: detectGalleryItemType(normalizedUrl, mediaType), autor: normalizeGalleryAuthor(autor) }];
-
-                        await galleryRef.set(updatedPhotos);
+                        const newPhoto = { url: normalizedUrl, label: GALLERY_LABELS.includes(label) ? label : '', type: detectGalleryItemType(normalizedUrl, mediaType), autor: normalizeGalleryAuthor(autor) };
+                        const transactionResult = await galleryRef.transaction((currentPhotos) => {
+                            const safePhotos = Array.isArray(currentPhotos) ? currentPhotos : [];
+                            return [...safePhotos, newPhoto];
+                        });
+                        const updatedPhotos = Array.isArray(transactionResult?.snapshot?.val())
+                            ? transactionResult.snapshot.val()
+                            : [newPhoto];
                         setFormData(prev => ({
                             ...prev,
                             galeria: { ...prev.galeria, [tag]: updatedPhotos }
@@ -4888,22 +4935,7 @@ const saveProfile = (e) => {
                                                 <button
                                                     type="button"
                                                     onClick={() => {
-                                                        const existingWindow = galleryWindowRef.current;
-                                                        const nuevaVentana = existingWindow && !existingWindow.closed ? existingWindow : window.open('', '_blank');
-                                                        galleryWindowRef.current = nuevaVentana;
-                                                        renderGalleryWindow({
-                                                            targetWindow: nuevaVentana,
-                                                            profileName: selectedTallerProfile?.nombre || '',
-                                                            profession: selectedTallerProfile?.profesion || '',
-                                                            photos: [
-                                                                ...((selectedTallerProfile?.galeria?.fotos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'image'), sourceTag: 'fotos', sourceIndex: index }))),
-                                                                ...((selectedTallerProfile?.galeria?.videos || []).map((item, index) => ({ ...normalizeGalleryItem(item, 'video'), sourceTag: 'videos', sourceIndex: index })))
-                                                            ],
-                                                            editingId: selectedTallerProfile?.firebaseId || selectedTallerProfile?.id || '',
-                                                            battlePhotoPrefs: selectedTallerProfile?.batallaFotosPreferidas || selectedTallerProfile?.galeria?.battlePhotoPreferences || {},
-                                                            profilePhotoUrl: selectedTallerProfile?.fotos?.[0] || ''
-                                                        });
-                                                        nuevaVentana?.focus();
+                                                        renderProfileGalleryWindow(selectedTallerProfile);
                                                     }}
                                                     className="btn-metal py-3 rounded-xl text-[11px] font-black tracking-wide uppercase"
                                                 >
