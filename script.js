@@ -575,6 +575,7 @@
             const [carpetaAbierta, setCarpetaAbierta] = React.useState(null);
             const galleryWindowRef = useRef(null);
             const contextMenuRef = useRef(null);
+            const galleryUploadInputRef = useRef(null);
             const [perfiles, setPerfiles] = useState([]);
                 const neonColors = {
         "CANTANTE": { color: "#0ea5e9", sombra: "rgba(14,165,233,0.8)" },    // Celeste
@@ -631,6 +632,13 @@
             const [galleryLabelDraft, setGalleryLabelDraft] = useState('');
             const [galleryUrlDraft, setGalleryUrlDraft] = useState('');
             const [galleryEditorError, setGalleryEditorError] = useState('');
+            const [isGalleryUploadModalOpen, setIsGalleryUploadModalOpen] = useState(false);
+            const [galleryUploadProfile, setGalleryUploadProfile] = useState(null);
+            const [galleryUploadFile, setGalleryUploadFile] = useState(null);
+            const [galleryUploadPreviewUrl, setGalleryUploadPreviewUrl] = useState('');
+            const [galleryUploadLabel, setGalleryUploadLabel] = useState('');
+            const [galleryUploadError, setGalleryUploadError] = useState('');
+            const [isSavingGalleryUpload, setIsSavingGalleryUpload] = useState(false);
             const [isSavingGalleryEditor, setIsSavingGalleryEditor] = useState(false);
             const [tallerSearchTerm, setTallerSearchTerm] = useState('');
             const [anonMediaUrl, setAnonMediaUrl] = useState('');
@@ -790,6 +798,17 @@ const getInitialCatFormData = () => ({
                 const updatedItems = [...currentItems, { url: normalizedUrl, label: normalizedLabel, type: normalizedType, autor: normalizeGalleryAuthor(autor) }];
 
                 await galleryRef.set(updatedItems);
+
+                setPerfiles((currentProfiles) => currentProfiles.map((profile) => {
+                    if (profile?.firebaseId !== profileId) return profile;
+                    return {
+                        ...profile,
+                        galeria: {
+                            ...(profile.galeria || {}),
+                            [tag]: updatedItems
+                        }
+                    };
+                }));
 
                 if (profileId === editingId) {
                     setFormData(prev => ({
@@ -962,6 +981,101 @@ const getInitialCatFormData = () => ({
                 reader.onerror = () => reject(new Error('No se pudo leer el archivo.'));
                 reader.readAsDataURL(file);
             });
+            const openGalleryUploadModal = (profile) => {
+                if (!profile?.profileId) {
+                    setGalleryUploadError('Seleccioná un personaje válido para agregar archivos.');
+                    return;
+                }
+                setGalleryUploadProfile(profile);
+                setGalleryUploadFile(null);
+                setGalleryUploadPreviewUrl('');
+                setGalleryUploadLabel('');
+                setGalleryUploadError('');
+                setIsSavingGalleryUpload(false);
+                if (galleryUploadInputRef.current) galleryUploadInputRef.current.value = '';
+                setIsGalleryUploadModalOpen(true);
+            };
+            const closeGalleryUploadModal = () => {
+                if (isSavingGalleryUpload) return;
+                setIsGalleryUploadModalOpen(false);
+                setGalleryUploadProfile(null);
+                setGalleryUploadFile(null);
+                setGalleryUploadPreviewUrl('');
+                setGalleryUploadLabel('');
+                setGalleryUploadError('');
+                if (galleryUploadInputRef.current) galleryUploadInputRef.current.value = '';
+            };
+            const handleGalleryUploadFileChange = async (event) => {
+                const file = event?.target?.files?.[0] || null;
+                setGalleryUploadError('');
+                setGalleryUploadFile(null);
+                setGalleryUploadPreviewUrl('');
+                if (!file) return;
+
+                const mimeType = String(file.type || '').toLowerCase();
+                const isAcceptedMedia = mimeType.startsWith('image/') || mimeType.startsWith('video/');
+                if (!isAcceptedMedia) {
+                    setGalleryUploadError('Formato no válido. Subí una imagen, GIF o video.');
+                    if (event?.target) event.target.value = '';
+                    return;
+                }
+
+                try {
+                    const previewUrl = await readFileAsDataUrl(file);
+                    setGalleryUploadFile(file);
+                    setGalleryUploadPreviewUrl(previewUrl);
+                } catch (error) {
+                    console.error('Error al generar preview:', error);
+                    setGalleryUploadError(error?.message || 'No se pudo generar la vista previa.');
+                }
+            };
+            const confirmGalleryUpload = async () => {
+                if (isSavingGalleryUpload) return;
+                const profileId = galleryUploadProfile?.profileId;
+                if (!profileId) {
+                    setGalleryUploadError('Seleccioná un personaje válido.');
+                    return;
+                }
+                if (!galleryUploadFile) {
+                    setGalleryUploadError('Elegí un archivo antes de aceptar.');
+                    return;
+                }
+
+                const mimeType = String(galleryUploadFile.type || '').toLowerCase();
+                const isAcceptedMedia = mimeType.startsWith('image/') || mimeType.startsWith('video/');
+                if (!isAcceptedMedia) {
+                    setGalleryUploadError('Formato no válido. Subí una imagen, GIF o video.');
+                    return;
+                }
+
+                setIsSavingGalleryUpload(true);
+                setGalleryUploadError('');
+                try {
+                    const uploadedUrl = await uploadFileToFirebaseStorage(galleryUploadFile, `perfiles/${profileId}/galeria`);
+                    const detectedType = mimeType.startsWith('video/')
+                        ? 'video'
+                        : detectGalleryItemType(uploadedUrl, 'image');
+                    const isGifUpload = mimeType === 'image/gif'
+                        || /\.gif$/i.test(galleryUploadFile.name || '')
+                        || isGifUrl(uploadedUrl);
+                    const galleryTag = detectedType === 'video' ? 'videos' : (isGifUpload ? 'gifs' : 'fotos');
+
+                    await addGalleryImage({
+                        profileId,
+                        url: uploadedUrl,
+                        tag: galleryTag,
+                        label: galleryUploadLabel,
+                        type: detectedType,
+                        autor: ''
+                    });
+                    closeGalleryUploadModal();
+                } catch (error) {
+                    console.error('Error al subir archivo a galería:', error);
+                    setGalleryUploadError(error?.message || 'No se pudo subir el archivo.');
+                } finally {
+                    setIsSavingGalleryUpload(false);
+                }
+            };
             const withProfilePhotoSyncedToGallery = (prevState, profilePhotoUrlRaw) => {
                 const normalizedProfileUrl = String(profilePhotoUrlRaw || '').trim();
                 const currentGallery = Array.isArray(prevState?.galeria?.fotos) ? prevState.galeria.fotos : [];
@@ -3023,16 +3137,26 @@ const saveProfile = async (e) => {
                             {selectedCharacterBuckets.length > 0 ? (
                                 <div className="flex flex-wrap gap-2">
                                     {selectedCharacterBuckets.map((bucket) => (
-                                        <button
-                                            key={bucket.id}
-                                            type="button"
-                                            onClick={() => removeCharacterFromGallerySelection(bucket.id)}
-                                            className="btn-metal btn-metal--silver inline-flex items-center gap-2 px-4 py-2 rounded-full text-[10px] text-slate-900"
-                                            title="Quitar personaje de la galería visible"
-                                        >
-                                            {bucket.nombre}
-                                            <LucideIcon name="x" size={12} />
-                                        </button>
+                                        <div key={bucket.id} className="inline-flex flex-wrap items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => removeCharacterFromGallerySelection(bucket.id)}
+                                                className="btn-metal btn-metal--silver inline-flex items-center gap-2 px-4 py-2 rounded-full text-[10px] text-slate-900"
+                                                title="Quitar personaje de la galería visible"
+                                            >
+                                                {bucket.nombre}
+                                                <LucideIcon name="x" size={12} />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => openGalleryUploadModal(bucket)}
+                                                className="btn-metal btn-metal--blue inline-flex items-center gap-2 px-4 py-2 rounded-full text-[10px] text-cyan-50"
+                                                title={`Agregar archivo a ${bucket.nombre}`}
+                                            >
+                                                <LucideIcon name="upload" size={12} />
+                                                Agregar Archivo
+                                            </button>
+                                        </div>
                                     ))}
                                 </div>
                             ) : (
@@ -3483,6 +3607,123 @@ const saveProfile = async (e) => {
                             </div>
                         </div>
                         )}
+                    </div>
+                </div>
+            )}
+
+            {isGalleryUploadModalOpen && (
+                <div
+                    className="fixed inset-0 z-[135] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-3 sm:p-6"
+                    style={isSidebarOpen ? { left: '18rem' } : undefined}
+                    onClick={closeGalleryUploadModal}
+                >
+                    <div className="w-full max-w-2xl theme-surface-card border theme-border-secondary rounded-[2rem] p-5 sm:p-7 space-y-5" onClick={(event) => event.stopPropagation()}>
+                        <div className="flex items-start justify-between gap-4">
+                            <div>
+                                <p className="text-[10px] font-black uppercase tracking-[0.25em] text-cyan-300">{galleryUploadProfile?.nombre || 'Galería'}</p>
+                                <h3 className="text-2xl sm:text-3xl font-black italic uppercase tracking-tight text-white">Agregar Archivo</h3>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={closeGalleryUploadModal}
+                                disabled={isSavingGalleryUpload}
+                                className="btn-metal btn-metal--silver w-11 h-11 rounded-full flex items-center justify-center text-slate-900 disabled:opacity-60"
+                                aria-label="Cerrar modal de carga"
+                            >
+                                <LucideIcon name="x" size={18} />
+                            </button>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-[1fr_220px] gap-5">
+                            <div className="min-h-[260px] rounded-[1.5rem] border theme-border-secondary bg-slate-950/80 overflow-hidden flex items-center justify-center">
+                                {galleryUploadPreviewUrl ? (
+                                    String(galleryUploadFile?.type || '').toLowerCase().startsWith('video/') ? (
+                                        <video
+                                            src={galleryUploadPreviewUrl}
+                                            controls
+                                            playsInline
+                                            className="w-full h-full max-h-[420px] object-contain bg-black"
+                                        />
+                                    ) : (
+                                        <img
+                                            src={galleryUploadPreviewUrl}
+                                            alt="Preview del archivo"
+                                            className="w-full h-full max-h-[420px] object-contain bg-black"
+                                        />
+                                    )
+                                ) : (
+                                    <div className="text-center p-6 space-y-3 text-slate-400">
+                                        <LucideIcon name="image-plus" size={44} className="mx-auto text-cyan-300" />
+                                        <p className="text-xs font-bold uppercase tracking-[0.18em]">Elegí una imagen, GIF o video</p>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="space-y-4">
+                                <input
+                                    ref={galleryUploadInputRef}
+                                    type="file"
+                                    accept="image/*,video/*"
+                                    className="hidden"
+                                    onChange={handleGalleryUploadFileChange}
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => galleryUploadInputRef.current?.click()}
+                                    disabled={isSavingGalleryUpload}
+                                    className="btn-metal btn-metal--blue w-full px-5 py-4 rounded-2xl text-[11px] text-cyan-50 disabled:opacity-60"
+                                >
+                                    agregar
+                                </button>
+
+                                <label className="block space-y-2">
+                                    <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Etiqueta</span>
+                                    <select
+                                        className="filter-select filter-select--compact w-full"
+                                        value={galleryUploadLabel}
+                                        onChange={(event) => setGalleryUploadLabel(event.target.value)}
+                                        disabled={isSavingGalleryUpload}
+                                    >
+                                        <option value="">Sin etiqueta</option>
+                                        {GALLERY_LABELS.map((label) => (
+                                            <option key={label} value={label}>{label}</option>
+                                        ))}
+                                    </select>
+                                </label>
+
+                                {galleryUploadFile && (
+                                    <div className="rounded-2xl border theme-border-secondary bg-slate-950/70 p-3 text-[10px] font-bold uppercase tracking-[0.1em] text-slate-300 break-all">
+                                        {galleryUploadFile.name}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {galleryUploadError && (
+                            <p className="rounded-2xl border border-rose-400/40 bg-rose-950/40 px-4 py-3 text-xs font-bold text-rose-200">{galleryUploadError}</p>
+                        )}
+                        {isSavingGalleryUpload && (
+                            <p className="text-xs font-black uppercase tracking-[0.18em] text-cyan-200">Guardando...</p>
+                        )}
+
+                        <div className="flex flex-col sm:flex-row sm:justify-end gap-3">
+                            <button
+                                type="button"
+                                onClick={closeGalleryUploadModal}
+                                disabled={isSavingGalleryUpload}
+                                className="btn-metal btn-metal--silver px-6 py-3 rounded-xl text-[10px] text-slate-900 disabled:opacity-60"
+                            >
+                                Cancelar
+                            </button>
+                            <button
+                                type="button"
+                                onClick={confirmGalleryUpload}
+                                disabled={isSavingGalleryUpload || !galleryUploadFile}
+                                className="btn-metal btn-metal--gold px-6 py-3 rounded-xl text-[10px] disabled:opacity-60"
+                            >
+                                {isSavingGalleryUpload ? 'Guardando...' : 'Aceptar'}
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
