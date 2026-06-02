@@ -166,6 +166,25 @@
                 return false;
             }
         };
+        const CRYING_EMOJI_FALLBACK = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
+            <svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640">
+                <rect width="640" height="640" fill="#020617"/>
+                <circle cx="320" cy="320" r="210" fill="#facc15"/>
+                <circle cx="240" cy="260" r="34" fill="#0f172a"/>
+                <circle cx="400" cy="260" r="34" fill="#0f172a"/>
+                <path d="M230 410 Q320 330 410 410" fill="none" stroke="#0f172a" stroke-width="28" stroke-linecap="round"/>
+                <path d="M210 305 C170 360 168 410 212 430 C256 410 252 360 210 305Z" fill="#38bdf8"/>
+                <path d="M430 305 C390 360 388 410 432 430 C476 410 472 360 430 305Z" fill="#38bdf8"/>
+            </svg>
+        `)}`;
+        const applyCryingEmojiFallback = (event) => {
+            const image = event?.currentTarget || event?.target;
+            if (!image) return;
+            image.onerror = null;
+            if (image.src !== CRYING_EMOJI_FALLBACK) {
+                image.src = CRYING_EMOJI_FALLBACK;
+            }
+        };
         const getSafeImageSrc = (rawUrl = '', fallback = '') => {
             const normalized = String(rawUrl || '').trim();
             if (!normalized || isBlockedMediaUrl(normalized)) return fallback;
