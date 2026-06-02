@@ -185,6 +185,7 @@
                 image.src = CRYING_EMOJI_FALLBACK;
             }
         };
+        const BROKEN_IMAGE_INLINE_HANDLER = `this.onerror=null;this.src='${CRYING_EMOJI_FALLBACK}';`;
         const getSafeImageSrc = (rawUrl = '', fallback = '') => {
             const normalized = String(rawUrl || '').trim();
             if (!normalized || isBlockedMediaUrl(normalized)) return fallback;
