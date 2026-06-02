@@ -447,6 +447,91 @@
             );
         };
 
+        const MultimediaModal = ({ isOpen = false, profile = null, onClose = () => {} }) => {
+            if (!isOpen || !profile) return null;
+
+            const mediaItems = [
+                ...getSafeGalleryArray(profile?.galeria, 'fotos', 'image'),
+                ...getSafeGalleryArray(profile?.galeria, 'gifs', 'image'),
+                ...getSafeGalleryArray(profile?.galeria, 'videos', 'video')
+            ];
+
+            return (
+                <div
+                    className="fixed inset-0 z-[180] flex items-center justify-center bg-slate-950/85 backdrop-blur-md px-4 py-8"
+                    onClick={onClose}
+                    role="presentation"
+                >
+                    <section
+                        className="hud-frame hud-frame--panel w-full max-w-6xl max-h-[90vh] overflow-y-auto rounded-[2rem] p-6 md:p-8 relative"
+                        onClick={(event) => event.stopPropagation()}
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label={`Multimedia de ${profile?.nombre || 'perfil'}`}
+                    >
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="absolute top-4 right-4 w-10 h-10 rounded-full border border-cyan-200/35 bg-slate-900/80 text-slate-100 flex items-center justify-center hover:bg-slate-800/90 transition"
+                            aria-label="Cerrar multimedia"
+                        >
+                            <LucideIcon name="x" size={18} />
+                        </button>
+
+                        <header className="mb-6 pr-12">
+                            <p className="text-[10px] uppercase tracking-[0.35em] text-cyan-200/90 font-black">Multimedia</p>
+                            <h3 className="text-3xl md:text-4xl font-black uppercase text-white mt-2">
+                                {profile?.nombre || 'Sin nombre'}
+                            </h3>
+                        </header>
+
+                        {mediaItems.length ? (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+                                {mediaItems.map((item, index) => (
+                                    <article
+                                        key={`${item.url}-${index}`}
+                                        className="rounded-2xl overflow-hidden border border-cyan-200/20 bg-slate-950/70 shadow-lg"
+                                    >
+                                        {item.type === 'video' ? (
+                                            <video
+                                                src={item.url}
+                                                className="w-full h-72 object-cover bg-black"
+                                                controls
+                                                preload="metadata"
+                                            />
+                                        ) : (
+                                            <img
+                                                src={getSafeImageSrc(item.url, CRYING_EMOJI_FALLBACK)}
+                                                alt={`Multimedia ${index + 1}`}
+                                                className="w-full h-72 object-cover"
+                                                loading="lazy"
+                                                onError={applyCryingEmojiFallback}
+                                            />
+                                        )}
+                                        <div className="p-3 text-xs text-slate-300 flex items-center justify-between gap-2">
+                                            <span>{item.label ? `Etiqueta ${item.label}` : 'Sin etiqueta'}</span>
+                                            <a
+                                                className="text-cyan-200 hover:text-cyan-100"
+                                                href={item.url}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                            >
+                                                Abrir
+                                            </a>
+                                        </div>
+                                    </article>
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="rounded-2xl border border-slate-500/30 bg-slate-900/50 px-6 py-8 text-center text-sm text-slate-300">
+                                No hay multimedia cargada para este perfil.
+                            </div>
+                        )}
+                    </section>
+                </div>
+            );
+        };
+
         const renderGalleryWindow = ({ targetWindow, profileName, profession, photos }) => {
             if (!targetWindow) return;
             const safePhotos = Array.isArray(photos) ? photos.filter((item) => item?.url) : [];
